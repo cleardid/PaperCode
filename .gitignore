@@ -1,0 +1,59 @@
+###############################################
+##  DynaOrchestrator 专属精简配置
+###############################################
+
+# --- 1. 编译产物 (Build Artifacts) ---
+# 排除所有生成的二进制文件、库和临时编译中间件
+[Bb]in/
+[Oo]bj/
+[Gg]enerated/
+[Tt]est[Rr]esults/
+# C++ 特有的编译文件夹
+Debug/
+Release/
+x64/
+x86/
+ARM/
+ARM64/
+
+# --- 2. Visual Studio 本地化缓存 (User/IDE Specific) ---
+# 这些文件记录了你的窗口位置、断点等，不属于代码
+.vs/
+*.user
+*.userosscache
+*.sln.docstates
+*.suo
+*.vstoken
+
+# --- 3. C++ 调试与符号文件 (C++ Debugging) ---
+# 这些文件体积巨大且由 VS 自动生成
+*.pdb
+*.ilk
+*.aps
+*.idb
+*.dep
+*.res
+*.tlog
+*.lastbuildstate
+*.obj
+*.iobj
+*.ipdb
+*.log
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+ipch/
+
+# --- 4. 配置文件与测试数据 (Project Specific) ---
+# 注意：为了保护你的本地环境和防止上传巨大仿真结果
+config.json
+experiments/
+cases/
+*.log
+*.tmp
+
+# --- 5. 杂项 ---
+# 排除操作系统产生的缩略图等
+.DS_Store
+Thumbs.db
