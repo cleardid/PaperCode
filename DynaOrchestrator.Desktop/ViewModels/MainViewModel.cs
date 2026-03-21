@@ -127,6 +127,14 @@ namespace DynaOrchestrator.Desktop.ViewModels
                 Cases.Clear();
                 foreach (var r in records)
                 {
+                    // --- 状态重置逻辑 ---
+                    // 1. 如果上次退出时任务显示为 Running，说明执行被非正常中断，需重置为 Pending
+                    // 2. 如果任务状态为 Failed，通常需要重新跑，也重置为 Pending
+                    if (r.Status == "Running" || r.Status == "Failed")
+                    {
+                        r.Status = "Pending";
+                    }
+
                     Cases.Add(r);
                 }
                 AppendLog($"[UI] 成功加载 {Cases.Count} 条记录。");
@@ -139,6 +147,18 @@ namespace DynaOrchestrator.Desktop.ViewModels
 
         private async void StartBatch()
         {
+            // --- 1. 运行前状态重置 ---
+            // 无论是因为点击了“停止”，还是之前的残留错误
+            // 我们将所有非 Success 的任务（Running, Failed, Canceled）统一重置为 Pending
+            foreach (var record in Cases)
+            {
+                if (record.Status == "Running" || record.Status == "Failed" || record.Status == "Canceled")
+                {
+                    record.Status = "Pending";
+                }
+            }
+
+            // --- 2. 启动执行流程 ---
             IsRunning = true;
             _cts = new CancellationTokenSource();
             Logs.Clear();
@@ -150,28 +170,33 @@ namespace DynaOrchestrator.Desktop.ViewModels
                 string workspaceRoot = Path.GetFullPath(Path.Combine(baseDir, WorkspaceRootDir));
                 string fullCsvPath = Path.GetFullPath(Path.Combine(workspaceRoot, CasesCsvPath));
 
+                // 仅将状态为 Pending 的记录提交给 BatchRunner 
+                // 或者由 BatchRunner 内部识别 Status 进行过滤
                 var recordList = new System.Collections.Generic.List<BatchCaseRecord>(Cases);
 
-                await BatchRunner.RunAsync(
-                    batchRoot: workspaceRoot,
-                    casesCsvPath: fullCsvPath,
-                    baseConfig: _baseConfig,
-                    maxParallelCases: MaxParallelCases,
-                    ncpuPerCase: NcpuPerCase,
-                    memoryPerCase: _baseConfig.Workspace.MemoryPerCase,
-                    records: recordList,
-                    logger: msg => Application.Current.Dispatcher.Invoke(() => AppendLog(msg)),
-                    cancellationToken: _cts.Token
-                );
+                await Task.Run(() =>
+                {
+                    return BatchRunner.RunAsync(
+                        batchRoot: workspaceRoot,
+                        casesCsvPath: fullCsvPath,
+                        baseConfig: _baseConfig,
+                        maxParallelCases: MaxParallelCases,
+                        ncpuPerCase: NcpuPerCase,
+                        memoryPerCase: _baseConfig.Workspace.MemoryPerCase,
+                        records: recordList,
+                        logger: msg => Application.Current.Dispatcher.Invoke(() => AppendLog(msg)),
+                        cancellationToken: _cts.Token
+                    );
+                });
             }
             catch (Exception ex)
             {
-                AppendLog($"[Error] 批处理发生致命异常: {ex.Message}");
+                AppendLog($"[Error] 批处理过程中发生异常: {ex.Message}");
             }
             finally
             {
                 IsRunning = false;
-                AppendLog("[UI] 批处理任务执行周期结束。");
+                AppendLog("[UI] 批处理执行周期已结束。");
             }
         }
 
