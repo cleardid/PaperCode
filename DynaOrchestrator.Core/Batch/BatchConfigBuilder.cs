@@ -30,7 +30,8 @@ namespace DynaOrchestrator.Core.Batch
             BatchCaseRecord record,
             BatchCasePaths paths,
             int ncpuPerCase,
-            string memoryPerCase)
+            string memoryPerCase,
+            Action<string> logger)
         {
             if (baseConfig == null)
                 throw new ArgumentNullException(nameof(baseConfig));
@@ -67,19 +68,17 @@ namespace DynaOrchestrator.Core.Batch
             // LsDynaPath 保持基础配置不变
 
             // ---------------- ExplosiveParams ----------------
-            // CSV 中 XAbs/YAbs/ZAbs 是 m
-            // 你的 ExplosiveParams 配置要求是 mm
-            config.Explosive.Xc = record.XAbs * 1000.0;
-            config.Explosive.Yc = record.YAbs * 1000.0;
-            config.Explosive.Zc = record.ZAbs * 1000.0;
+            config.Explosive.Xc = record.X;
+            config.Explosive.Yc = record.Y;
+            config.Explosive.Zc = record.Z;
 
             // W 单位 kg
             config.Explosive.W = record.ChargeMass;
 
-            // Radius:
-            // 当前不在这里强行覆盖，沿用基础配置中的半径逻辑。
-            // 若后续你确认需要由 ChargeMass 显式推导 Radius(mm)，再在这里补。
-            // config.Explosive.Radius = CalculateRadiusMm(record.ChargeMass);
+            // 根据 ChargeMass 和 ChargeDensity 显式推导 Radius(mm)
+            config.Explosive.Radius = CalculateRadiusMm(record.ChargeMass, record.ChargeDensity);
+
+            logger?.Invoke($"计算的爆炸半径为 {config.Explosive.Radius} mm。");
 
             // ---------------- OtherConfig ----------------
             // 直接深拷贝原始配置，不做单位换算。
@@ -87,6 +86,17 @@ namespace DynaOrchestrator.Core.Batch
             config.Other = DeepCloneOther(baseConfig.Other);
 
             return config;
+        }
+
+        /// <summary>
+        /// 根据装药质量和装药密度计算爆炸半径，单位 mm。
+        /// </summary>
+        /// <param name="chargeMass">装药质量，单位 kg</param>
+        /// <param name="chargeDensity">装药密度，单位 kg/m3</param>
+        /// <returns>半径，单位 mm</returns>
+        private static double CalculateRadiusMm(double chargeMass, double chargeDensity)
+        {
+            return Math.Pow(3 * chargeMass / (4 * Math.PI * chargeDensity), 1.0 / 3) * 1000;
         }
 
         /// <summary>

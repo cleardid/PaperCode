@@ -1,5 +1,4 @@
-﻿using System;
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
 
 namespace DynaOrchestrator.Core.Batch
@@ -8,7 +7,7 @@ namespace DynaOrchestrator.Core.Batch
     /// 批处理中的单条工况记录。
     /// 该对象直接对应 cases/*.csv 中的一行。
     /// </summary>
-    public sealed class BatchCaseRecord: INotifyPropertyChanged
+    public sealed class BatchCaseRecord : INotifyPropertyChanged
     {
         /// <summary>
         /// 工况唯一标识，例如 G1_P1_C1
@@ -46,19 +45,19 @@ namespace DynaOrchestrator.Core.Batch
         public string PositionType { get; set; } = string.Empty;
 
         /// <summary>
-        /// 归一化爆点坐标 x，范围通常为 [0, 1]
+        /// 爆点坐标 x，单位 mm
         /// </summary>
-        public double XNorm { get; set; }
+        public double X { get; set; }
 
         /// <summary>
-        /// 归一化爆点坐标 y，范围通常为 [0, 1]
+        /// 爆点坐标 y，单位 mm
         /// </summary>
-        public double YNorm { get; set; }
+        public double Y { get; set; }
 
         /// <summary>
-        /// 归一化爆点坐标 z，范围通常为 [0, 1]
+        /// 爆点坐标 z，单位 mm
         /// </summary>
-        public double ZNorm { get; set; }
+        public double Z { get; set; }
 
         /// <summary>
         /// 装药等级，例如 C1 / C2 / C3
@@ -66,12 +65,18 @@ namespace DynaOrchestrator.Core.Batch
         public string ChargeLevel { get; set; } = string.Empty;
 
         /// <summary>
+        /// 装药密度 kg/m3
+        /// 用于计算装药质量，用于计算爆炸参数中的半径
+        /// </summary>
+        public double ChargeDensity { get; set; }
+
+        /// <summary>
         /// 装药质量，单位 kg
         /// </summary>
         public double ChargeMass { get; set; }
 
         // 断点续跑状态列
-// --- 运行时动态状态属性 ---
+        // --- 运行时动态状态属性 ---
         private string _completed = "0";
         public string Completed
         {
@@ -98,33 +103,18 @@ namespace DynaOrchestrator.Core.Batch
         /// </summary>
         public bool IsCompleted =>
             string.Equals((Completed ?? string.Empty).Trim(), "1", StringComparison.OrdinalIgnoreCase);
-        
-        /// <summary>
-        /// 根据归一化坐标与房间尺寸计算得到的绝对爆点 x 坐标，单位 m
-        /// </summary>
-        public double XAbs => XNorm * L;
 
-        /// <summary>
-        /// 根据归一化坐标与房间尺寸计算得到的绝对爆点 y 坐标，单位 m
-        /// </summary>
-        public double YAbs => YNorm * W;
-
-        /// <summary>
-        /// 根据归一化坐标与房间尺寸计算得到的绝对爆点 z 坐标，单位 m
-        /// </summary>
-        public double ZAbs => ZNorm * H;
-        
         /// <summary>
         /// 用于 UI 界面显示位置信息
         /// </summary>
-        public string AbsPositionDisplay => $"({XAbs:F1}, {YAbs:F1}, {ZAbs:F1})";
+        public string AbsPositionDisplay => $"({X:F2}, {Y:F2}, {Z:F2}) mm";
 
         /// <summary>
         /// 当前工况对应的基础模型目录名。
         /// 当前规则下直接使用 GeomType 映射 base_models/G1、G2、G3。
         /// </summary>
         public string BaseModelKey => GeomType;
-        
+
         public event PropertyChangedEventHandler? PropertyChanged;
         private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
@@ -136,8 +126,8 @@ namespace DynaOrchestrator.Core.Batch
         /// </summary>
         public override string ToString()
         {
-            return $"{CaseId} | {GeomType} | Pos=({XNorm:F3},{YNorm:F3},{ZNorm:F3}) | " +
-                   $"Abs=({XAbs:F3},{YAbs:F3},{ZAbs:F3}) m | Charge={ChargeLevel}/{ChargeMass:F4} kg | " +
+            return $"{CaseId} | {GeomType} | Pos=({X:F3},{Y:F3},{Z:F3}) | " +
+                   $"Abs=({X:F2}, {Y:F2}, {Z:F2}) mm | Density={ChargeDensity:F4} kg/m3 | Charge={ChargeLevel}/{ChargeMass:F4} kg | " +
                    $"Completed={Completed} | Status={Status}";
         }
     }

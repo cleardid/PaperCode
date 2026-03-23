@@ -9,7 +9,7 @@ namespace DynaOrchestrator.Core.Models
         public double Xc { get; set; } // 爆心 X (mm)
         public double Yc { get; set; } // 爆心 Y (mm)
         public double Zc { get; set; } // 爆心 Z (mm)
-        public double Radius { get; set; } // 用于几何自适应网格生成的初始半径 单位 mm
+        public double Radius { get; set; } // 爆源半径 单位 mm
         public double W { get; set; }      // TNT 当量 (kg)，用于物理特征注入
     }
 }

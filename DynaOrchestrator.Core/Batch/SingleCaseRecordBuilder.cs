@@ -1,5 +1,4 @@
 ﻿using DynaOrchestrator.Core.Models;
-using System;
 
 namespace DynaOrchestrator.Core.Batch
 {
@@ -18,6 +17,7 @@ namespace DynaOrchestrator.Core.Batch
                 ? "G1"
                 : config.Workspace.SingleGeomType;
 
+            // 计算房间尺寸（m）
             double l = config.Explosive.Xc / 1000.0;
             double w = config.Explosive.Yc / 1000.0;
             double h = config.Explosive.Zc / 1000.0;
@@ -26,9 +26,14 @@ namespace DynaOrchestrator.Core.Batch
             if (w <= 0) w = 1.0;
             if (h <= 0) h = 1.0;
 
-            double xAbs = config.Explosive.Xc / 1000.0;
-            double yAbs = config.Explosive.Yc / 1000.0;
-            double zAbs = config.Explosive.Zc / 1000.0;
+            // 依据炸药半径和当量计算炸药密度（kg/m³）
+            // 获取半径 (mm) 和质量 (kg)
+            double radius = config.Explosive.Radius;
+            double mass = config.Explosive.W;
+            // 计算体积 (m³)，注意单位转换
+            double volume = (4.0 / 3.0) * Math.PI * Math.Pow(radius / 1000.0, 3);
+            // 计算密度 (kg/m³)
+            double density = mass / volume;
 
             return new BatchCaseRecord
             {
@@ -39,21 +44,15 @@ namespace DynaOrchestrator.Core.Batch
                 W = w,
                 H = h,
                 PositionType = "single",
-                XNorm = Clamp01(l > 0 ? xAbs / l : 0.5),
-                YNorm = Clamp01(w > 0 ? yAbs / w : 0.5),
-                ZNorm = Clamp01(h > 0 ? zAbs / h : 0.5),
+                X = config.Explosive.Xc,
+                Y = config.Explosive.Yc,
+                Z = config.Explosive.Zc,
                 ChargeLevel = "single",
                 ChargeMass = config.Explosive.W,
+                ChargeDensity = density,
                 Completed = "0",
                 Status = "Pending"
             };
-        }
-
-        private static double Clamp01(double v)
-        {
-            if (v < 0) return 0;
-            if (v > 1) return 1;
-            return v;
         }
     }
 }

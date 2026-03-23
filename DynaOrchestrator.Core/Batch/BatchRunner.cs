@@ -95,7 +95,7 @@ namespace DynaOrchestrator.Core.Batch
                     cancellationToken.ThrowIfCancellationRequested();
 
                     // 【核心修复】：使用 Task.Run 将长耗时的阻塞操作丢到后台线程池
-                    BatchRunResult result = await Task.Run(() => 
+                    BatchRunResult result = await Task.Run(() =>
                     {
                         return RunSingleCase(
                             fullBatchRoot,
@@ -182,7 +182,8 @@ namespace DynaOrchestrator.Core.Batch
                     record,
                     paths,
                     ncpuPerCase,
-                    memoryPerCase);
+                    memoryPerCase,
+                    logger);
 
                 BatchConfigBuilder.WriteConfig(caseConfig, paths.LocalConfigFile);
                 WriteCaseMetadata(paths.LocalCaseMetadataFile, record, paths);
@@ -246,14 +247,12 @@ namespace DynaOrchestrator.Core.Batch
                 record.W,
                 record.H,
                 record.PositionType,
-                record.XNorm,
-                record.YNorm,
-                record.ZNorm,
-                record.XAbs,
-                record.YAbs,
-                record.ZAbs,
+                record.X,
+                record.Y,
+                record.Z,
                 record.ChargeLevel,
                 record.ChargeMass,
+                record.ChargeDensity,
                 record.Completed,
                 record.Status,
                 record.LastRunTime,

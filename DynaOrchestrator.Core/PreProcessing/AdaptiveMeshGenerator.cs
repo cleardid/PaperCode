@@ -261,6 +261,7 @@ namespace DynaOrchestrator.Core.PreProcessing
                         if (geoDataLineCount == 3)
                         {
                             // 使用不变区域文化严格对齐 F10.0 格式
+                            // 注意：这里直接写入爆炸源中心和半径，单位为 mm，与 K 文件保持一致
                             writer.WriteLine(Fmt10(exp.Xc) + Fmt10(exp.Yc) + Fmt10(exp.Zc) + Fmt10(exp.Radius));
                             continue;
                         }

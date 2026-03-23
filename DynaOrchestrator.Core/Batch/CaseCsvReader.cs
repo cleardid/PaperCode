@@ -92,11 +92,12 @@ namespace DynaOrchestrator.Core.Batch
                 "W",
                 "H",
                 "PositionType",
-                "x_norm",
-                "y_norm",
-                "z_norm",
+                "X",
+                "Y",
+                "Z",
                 "ChargeLevel",
                 "ChargeMass",
+                "ChargeDensity",
                 "DatasetStage"
             };
 
@@ -120,11 +121,12 @@ namespace DynaOrchestrator.Core.Batch
                 W = GetRequiredDouble(cells, headerMap, "W", lineNumber),
                 H = GetRequiredDouble(cells, headerMap, "H", lineNumber),
                 PositionType = GetRequiredString(cells, headerMap, "PositionType", lineNumber),
-                XNorm = GetRequiredDouble(cells, headerMap, "x_norm", lineNumber),
-                YNorm = GetRequiredDouble(cells, headerMap, "y_norm", lineNumber),
-                ZNorm = GetRequiredDouble(cells, headerMap, "z_norm", lineNumber),
+                X = GetRequiredDouble(cells, headerMap, "X", lineNumber),
+                Y = GetRequiredDouble(cells, headerMap, "Y", lineNumber),
+                Z = GetRequiredDouble(cells, headerMap, "Z", lineNumber),
                 ChargeLevel = GetRequiredString(cells, headerMap, "ChargeLevel", lineNumber),
                 ChargeMass = GetRequiredDouble(cells, headerMap, "ChargeMass", lineNumber),
+                ChargeDensity = GetRequiredDouble(cells, headerMap, "ChargeDensity", lineNumber),
                 DatasetStage = GetRequiredString(cells, headerMap, "DatasetStage", lineNumber),
 
                 Completed = GetOptionalString(cells, headerMap, "Completed", "0"),
@@ -156,9 +158,9 @@ namespace DynaOrchestrator.Core.Batch
             if (record.ChargeMass <= 0)
                 throw new Exception($"第 {lineNumber} 行 ChargeMass 必须大于 0。");
 
-            if (record.XNorm < 0 || record.XNorm > 1 ||
-                record.YNorm < 0 || record.YNorm > 1 ||
-                record.ZNorm < 0 || record.ZNorm > 1)
+            if (record.X < 0 || record.X > 1 ||
+                record.Y < 0 || record.Y > 1 ||
+                record.Z < 0 || record.Z > 1)
             {
                 throw new Exception($"第 {lineNumber} 行归一化坐标必须位于 [0,1] 范围内。");
             }

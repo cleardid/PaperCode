@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Text;
+﻿using System.Text;
 
 namespace DynaOrchestrator.Core.Batch
 {
@@ -68,7 +64,7 @@ namespace DynaOrchestrator.Core.Batch
         {
             var lines = new List<string>
             {
-                "CaseId,GeomType,L,W,H,PositionType,x_norm,y_norm,z_norm,ChargeLevel,ChargeMass,DatasetStage,Completed,Status,LastRunTime"
+                "CaseId,GeomType,L,W,H,PositionType,X,Y,Z,ChargeLevel,ChargeMass,ChargeDensity,DatasetStage,Completed,Status,LastRunTime"
             };
 
             foreach (var r in records)
@@ -80,11 +76,12 @@ namespace DynaOrchestrator.Core.Batch
                     EscapeCsv(r.W.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                     EscapeCsv(r.H.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                     EscapeCsv(r.PositionType),
-                    EscapeCsv(r.XNorm.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                    EscapeCsv(r.YNorm.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                    EscapeCsv(r.ZNorm.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    EscapeCsv(r.X.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    EscapeCsv(r.Y.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    EscapeCsv(r.Z.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                     EscapeCsv(r.ChargeLevel),
                     EscapeCsv(r.ChargeMass.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    EscapeCsv(r.ChargeDensity.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                     EscapeCsv(r.DatasetStage),
                     EscapeCsv(r.Completed),
                     EscapeCsv(r.Status),
