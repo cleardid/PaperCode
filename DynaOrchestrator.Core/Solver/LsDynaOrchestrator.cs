@@ -1,17 +1,25 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using DynaOrchestrator.Core.Models;
 
 namespace DynaOrchestrator.Core.Solver
 {
     public static class LsDynaOrchestrator
     {
-        public static bool Run(PipelineConfig config, Action<string>? logger = null)
-        {
+        // 记录当前所有正在运行的 LS-DYNA 进程
+        private static readonly ConcurrentDictionary<int, Process> RunningProcesses = new();
 
-            // 业务级验证标志位
+        public static bool Run(
+            PipelineConfig config,
+            CancellationToken cancellationToken = default,
+            Action<string>? logger = null)
+        {
             bool isNormalTermination = false;
+            Process? process = null;
+            CancellationTokenRegistration ctr = default;
 
             try
             {
@@ -19,17 +27,13 @@ namespace DynaOrchestrator.Core.Solver
                 string fullKFilePath = Path.GetFullPath(config.OutputKFile);
                 string workDir = Path.GetDirectoryName(fullKFilePath) ?? string.Empty;
 
-                // 确保工作目录存在
                 if (!Directory.Exists(workDir))
-                {
                     Directory.CreateDirectory(workDir);
-                }
 
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = config.LsDynaPath,
                     Arguments = $"i={Path.GetFileName(fullKFilePath)} memory={config.Memory} ncpu={config.Ncpu}",
-                    // 将 LS-DYNA 的生成目录锁死在这个文件夹
                     WorkingDirectory = workDir,
                     UseShellExecute = false,
                     CreateNoWindow = true,
@@ -37,45 +41,123 @@ namespace DynaOrchestrator.Core.Solver
                     RedirectStandardError = true
                 };
 
-                using (var process = Process.Start(startInfo))
+                process = Process.Start(startInfo);
+                if (process == null)
+                    return false;
+
+                RunningProcesses[process.Id] = process;
+
+                logger?.Invoke($"[DYNA] 进程已启动，PID={process.Id}");
+
+                process.OutputDataReceived += (s, e) =>
                 {
-                    if (process == null) return false;
-                    // 异步读取标准输出流，实时分析求解器状态
-                    process.OutputDataReceived += (s, e) =>
+                    if (!string.IsNullOrEmpty(e.Data))
                     {
-                        // 捕捉 LS-DYNA 经典的正常结束标志 (兼容带空格与不带空格的版本)
-                        if (!string.IsNullOrEmpty(e.Data))
+                        logger?.Invoke($"[DYNA] {e.Data}");
+                        if (e.Data.Contains("N o r m a l    t e r m i n a t i o n") ||
+                            e.Data.Contains("Normal termination"))
                         {
-                            logger?.Invoke($"[DYNA] {e.Data}");
-                            if (e.Data.Contains("N o r m a l    t e r m i n a t i o n") || e.Data.Contains("Normal termination"))
-                                isNormalTermination = true;
+                            isNormalTermination = true;
                         }
-                    };
-
-                    process.ErrorDataReceived += (s, e) =>
-                    {
-                        if (!string.IsNullOrEmpty(e.Data)) logger?.Invoke($"[DYNA ERR] {e.Data}");
-                    };
-
-                    process.BeginOutputReadLine();
-                    process.BeginErrorReadLine();
-
-                    // 进程级阻塞：死等求解器退出，确保文件锁释放且数据全部刷入硬盘
-                    process.WaitForExit();
-
-                    // 双重校验：进程已安全退出，且内部业务逻辑确认跑到了最后一个时间步
-                    if (!isNormalTermination)
-                    {
-                        logger?.Invoke("[Warning] LS-DYNA 未检测到正常结束标志！");
-                        return false;
                     }
-                    return true;
+                };
+
+                process.ErrorDataReceived += (s, e) =>
+                {
+                    if (!string.IsNullOrEmpty(e.Data))
+                        logger?.Invoke($"[DYNA ERR] {e.Data}");
+                };
+
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                // 一旦收到取消请求，立即杀死该求解器进程树
+                if (cancellationToken.CanBeCanceled)
+                {
+                    ctr = cancellationToken.Register(() =>
+                    {
+                        TryKillProcess(process, $"[DYNA] 收到取消请求，准备终止进程 PID={process.Id}", logger);
+                    });
                 }
+
+                // 阻塞等待进程结束；若上层触发取消，将由 Register 回调直接 Kill
+                process.WaitForExit();
+
+                // 如果结束是由取消触发，直接按取消处理，不走失败逻辑
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!isNormalTermination)
+                {
+                    logger?.Invoke("[Warning] LS-DYNA 未检测到正常结束标志！");
+                    return false;
+                }
+
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                logger?.Invoke("[DYNA] 求解器已被取消。");
+                throw;
             }
             catch (Exception ex)
             {
                 logger?.Invoke($"[Error] 求解器异常: {ex.Message}");
                 return false;
+            }
+            finally
+            {
+                ctr.Dispose();
+
+                if (process != null)
+                {
+                    RunningProcesses.TryRemove(process.Id, out _);
+                    process.Dispose();
+                }
+            }
+        }
+
+        /// <summary>
+        /// 直接杀死当前所有正在运行的 LS-DYNA 进程。
+        /// </summary>
+        public static void KillAllRunningProcesses(Action<string>? logger = null)
+        {
+            var snapshot = RunningProcesses.Values.ToArray();
+            if (snapshot.Length == 0)
+            {
+                logger?.Invoke("[DYNA] 当前没有正在运行的求解器进程。");
+                return;
+            }
+
+            logger?.Invoke($"[DYNA] 准备终止 {snapshot.Length} 个正在运行的求解器进程...");
+
+            foreach (var process in snapshot)
+            {
+                TryKillProcess(process, $"[DYNA] 强制终止进程 PID={process.Id}", logger);
+            }
+        }
+
+        private static void TryKillProcess(Process? process, string logMessage, Action<string>? logger)
+        {
+            if (process == null)
+                return;
+
+            try
+            {
+                if (process.HasExited)
+                    return;
+
+                logger?.Invoke(logMessage);
+
+                // 直接终止整个进程树，避免残留子进程
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // 进程可能刚好已经退出，忽略
+            }
+            catch (Exception ex)
+            {
+                logger?.Invoke($"[DYNA] 终止进程失败: {ex.Message}");
             }
         }
     }

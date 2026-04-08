@@ -15,7 +15,7 @@ namespace DynaOrchestrator.Core.Batch
         public string CaseId { get; set; } = string.Empty;
 
         /// <summary>
-        /// 数据阶段，例如 pilot_54
+        /// 数据阶段，例如 train
         /// </summary>
         public string DatasetStage { get; set; } = string.Empty;
 

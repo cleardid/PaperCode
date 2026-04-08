@@ -104,10 +104,12 @@ namespace DynaOrchestrator.Core.Batch
         public string LocalCaseMetadataFile { get; }
 
         /// <summary>
-        /// 可选：单工况质量报告文件
+        /// 获取单个工况的标准路径定义。
         /// </summary>
-        public string LocalQualityReportFile { get; }
-
+        /// <param name="batchRoot">工作区根目录</param>
+        /// <param name="record">单个工况记录</param>
+        /// <exception cref="ArgumentException">空值异常</exception>
+        /// <exception cref="ArgumentNullException">空记录异常</exception>
         public BatchCasePaths(string batchRoot, BatchCaseRecord record)
         {
             if (string.IsNullOrWhiteSpace(batchRoot))
@@ -124,6 +126,7 @@ namespace DynaOrchestrator.Core.Batch
             SourceBaseKFile = Path.Combine(BaseModelDir, "base.k");
             SourceStlFile = Path.Combine(BaseModelDir, "room.stl");
 
+            // runs/<DatasetStage>/<CaseId>/
             CaseRootDir = Path.Combine(BatchRoot, "runs", DatasetStage, CaseId);
 
             InputDir = Path.Combine(CaseRootDir, "input");
@@ -137,9 +140,9 @@ namespace DynaOrchestrator.Core.Batch
             LocalOutputKFile = Path.Combine(RunDir, "model_out.k");
             LocalTrhistFile = Path.Combine(RunDir, "trhist");
 
-            LocalNpzFile = Path.Combine(OutputDir, "dataset_01.npz");
+            // 使得输出的NPZ 文件名与工况名一致
+            LocalNpzFile = Path.Combine(OutputDir, $"{record.CaseId}.npz");
             LocalCaseMetadataFile = Path.Combine(OutputDir, "case_metadata.json");
-            LocalQualityReportFile = Path.Combine(OutputDir, "quality_report.json");
         }
 
         /// <summary>

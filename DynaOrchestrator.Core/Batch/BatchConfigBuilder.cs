@@ -20,7 +20,7 @@ namespace DynaOrchestrator.Core.Batch
         /// 根据基础配置和 case 信息构建派生配置。
         /// </summary>
         /// <param name="baseConfig">基础配置（原始单位）</param>
-        /// <param name="record">单条工况记录，绝对坐标单位为 m</param>
+        /// <param name="record">单条工况记录，X/Y/Z 为绝对坐标，单位 mm；L/W/H 为房间尺寸，单位 m</param>
         /// <param name="paths">该 case 的标准路径</param>
         /// <param name="ncpuPerCase">单工况分配 CPU 数</param>
         /// <param name="memoryPerCase">单工况分配内存，例如 200m</param>
@@ -64,6 +64,7 @@ namespace DynaOrchestrator.Core.Batch
             // 样本标识
             config.Pipeline.CaseId = record.CaseId;
             config.Pipeline.DatasetVersion = record.DatasetStage;
+            //config.Pipeline.EnableGraphPostProcessing = 
 
             // LsDynaPath 保持基础配置不变
 
@@ -78,7 +79,7 @@ namespace DynaOrchestrator.Core.Batch
             // 根据 ChargeMass 和 ChargeDensity 显式推导 Radius(mm)
             config.Explosive.Radius = CalculateRadiusMm(record.ChargeMass, record.ChargeDensity);
 
-            logger?.Invoke($"计算的爆炸半径为 {config.Explosive.Radius} mm。");
+            logger?.Invoke($"计算的炸药半径为 {config.Explosive.Radius} mm。");
 
             // ---------------- OtherConfig ----------------
             // 直接深拷贝原始配置，不做单位换算。
@@ -100,7 +101,7 @@ namespace DynaOrchestrator.Core.Batch
         }
 
         /// <summary>
-        /// 将派生后的 AppConfig 写入 input/config.json。
+        /// 将派生后的 AppConfig 写入 input/config.json
         /// </summary>
         public static void WriteConfig(AppConfig config, string configPath)
         {

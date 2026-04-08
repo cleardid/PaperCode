@@ -158,11 +158,20 @@ namespace DynaOrchestrator.Core.Batch
             if (record.ChargeMass <= 0)
                 throw new Exception($"第 {lineNumber} 行 ChargeMass 必须大于 0。");
 
-            if (record.X < 0 || record.X > 1 ||
-                record.Y < 0 || record.Y > 1 ||
-                record.Z < 0 || record.Z > 1)
+            double roomLmm = record.L * 1000.0;
+            double roomWmm = record.W * 1000.0;
+            double roomHmm = record.H * 1000.0;
+
+            // X/Y/Z 始终存储绝对坐标，单位 mm。
+            // 这里要求爆点必须位于房间包围盒范围内。
+            if (record.X < 0 || record.X > roomLmm ||
+                record.Y < 0 || record.Y > roomWmm ||
+                record.Z < 0 || record.Z > roomHmm)
             {
-                throw new Exception($"第 {lineNumber} 行归一化坐标必须位于 [0,1] 范围内。");
+                throw new Exception(
+                    $"第 {lineNumber} 行绝对坐标超出房间范围。 " +
+                    $"当前坐标(mm)=({record.X}, {record.Y}, {record.Z})，" +
+                    $"房间范围(mm)=([0,{roomLmm}], [0,{roomWmm}], [0,{roomHmm}])。");
             }
         }
 

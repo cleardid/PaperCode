@@ -23,7 +23,7 @@ namespace DynaOrchestrator.Core.PostProcessing
     public static class GraphEngineAPI
     {
         private const string DllName = "DynaOrchestrator.Native.dll";
-        
+
         // ================= 新增：日志回调机制 =================
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         public delegate void LogCallbackDelegate([MarshalAs(UnmanagedType.LPStr)] string message);
@@ -39,7 +39,7 @@ namespace DynaOrchestrator.Core.PostProcessing
             if (wpfLogger == null) return;
 
             // 实例化委托并保存在静态变量中
-            _logCallbackInstance = new LogCallbackDelegate(msg => 
+            _logCallbackInstance = new LogCallbackDelegate(msg =>
             {
                 // 为 C++ 日志加上专门的前缀，并抛给上层 UI
                 wpfLogger.Invoke($"[C++ Engine] {msg}");
@@ -60,7 +60,7 @@ namespace DynaOrchestrator.Core.PostProcessing
         /// <param name="Xc">爆心 X 坐标 (mm)</param>
         /// <param name="Yc">爆心 Y 坐标 (mm)</param>
         /// <param name="Zc">爆心 Z 坐标 (mm)</param>
-        /// <param name="W">节点权重</param>
+        /// <param name="W">炸药当量 (kg)</param>
         /// </summary>
         /// <returns>图数据指针</returns>
         /// 注意：调用方必须使用 FreeGraphData 释放返回的内存

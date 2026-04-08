@@ -5,7 +5,7 @@
         /// <summary>
         /// 工作区根目录。默认程序所在目录。
         /// </summary>
-        public string RootDir { get; set; } = ".";
+        public string RootDir { get; set; } = "./experiments";
 
         /// <summary>
         /// 多任务 CSV 相对路径（相对于 RootDir）。
@@ -25,7 +25,7 @@
         /// <summary>
         /// 每个 case 分配给 LS-DYNA 的内存参数。
         /// </summary>
-        public string MemoryPerCase { get; set; } = "200m";
+        public string MemoryPerCase { get; set; } = "400m";
 
         /// <summary>
         /// 单任务默认数据阶段。

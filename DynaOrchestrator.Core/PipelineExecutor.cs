@@ -1,10 +1,12 @@
-﻿using DynaOrchestrator.Core.Models;
+﻿using DynaOrchestrator.Core.Batch;
+using DynaOrchestrator.Core.Models;
 using DynaOrchestrator.Core.PostProcessing;
 using DynaOrchestrator.Core.PreProcessing;
 using DynaOrchestrator.Core.Solver;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading;
 
 namespace DynaOrchestrator.Core
 {
@@ -21,7 +23,12 @@ namespace DynaOrchestrator.Core
         /// 2. 方法内部会统一调用 NormalizeUnits()；
         /// 3. optimizeHardwareResources=true 时，会自动覆盖 Ncpu / Memory。
         /// </summary>
-        public static void Execute(AppConfig appConfig, bool optimizeHardwareResources = false, Action<string>? logger = null)
+        public static void Execute(
+            AppConfig appConfig,
+            BatchCaseRecord record,
+            bool optimizeHardwareResources = false,
+            Action<string>? logger = null,
+            CancellationToken cancellationToken = default)
         {
             if (appConfig == null)
                 throw new ArgumentNullException(nameof(appConfig));
@@ -38,17 +45,17 @@ namespace DynaOrchestrator.Core
             }
 
             logger?.Invoke($"[Config] 已加载配置. 爆源( mm): ({exp.Xc}, {exp.Yc}, {exp.Zc}), 当量: {exp.W} kg");
-            
-// [Phase 1] 前处理 (如果连网格自适应也不需要，也可以加开关屏蔽)
+
+            // [Phase 1] 前处理 (如果连网格自适应也不需要，也可以加开关屏蔽)
             RunPreProcessing(config, other, exp, logger);
-    
+
             // [Phase 2] LS-DYNA 求解 (核心保留)
-            string actualTrhistPath = RunSimulation(config, logger);
-    
+            string actualTrhistPath = RunSimulation(config, cancellationToken, logger);
+
             // [Phase 3] 后处理与图构建 (按需执行)
             if (config.EnableGraphPostProcessing)
             {
-                RunPostProcessing(config, exp, other, actualTrhistPath, logger);
+                RunPostProcessing(config, exp, other, record, actualTrhistPath, logger);
             }
             else
             {
@@ -98,7 +105,7 @@ namespace DynaOrchestrator.Core
         /// 当前逻辑保持不变：
         /// 实际 trhist 路径 = OutputKFile 所在目录 + TrhistFile 文件名
         /// </summary>
-        private static string RunSimulation(PipelineConfig config, Action<string>? logger)
+        private static string RunSimulation(PipelineConfig config, CancellationToken cancellationToken, Action<string>? logger)
         {
             logger?.Invoke("\n[Phase 2] 启动 LS-DYNA 求解器...");
 
@@ -108,7 +115,12 @@ namespace DynaOrchestrator.Core
 
             string actualTrhistPath = Path.Combine(runDir, config.TrhistFile);
 
-            if (!LsDynaOrchestrator.Run(config) || !File.Exists(actualTrhistPath))
+            bool ok = LsDynaOrchestrator.Run(config, cancellationToken, logger);
+
+            // 若是用户主动停止导致的终止，直接按取消抛出，不归类为普通失败
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!ok || !File.Exists(actualTrhistPath))
                 throw new Exception($"仿真执行中断或未找到文件: {actualTrhistPath}");
 
             return actualTrhistPath;
@@ -119,16 +131,15 @@ namespace DynaOrchestrator.Core
         /// 注意：当前 DLL 原生返回 11 维静态属性：
         /// [x,y,z,d,nx,ny,nz,W^(1/3), d_wall, d_edge, d_corner]
         /// </summary>
-        private static void RunPostProcessing(PipelineConfig config, ExplosiveParams exp, OtherConfig other, string actualTrhistPath, Action<string>? logger)
+        private static void RunPostProcessing(PipelineConfig config, ExplosiveParams exp, OtherConfig other, BatchCaseRecord record, string actualTrhistPath, Action<string>? logger)
         {
             logger?.Invoke("\n[Phase 3] 提取物理图特征与静态属性...");
-            
+
             // 向 C++ 注入托管回调
             GraphEngineAPI.InitializeLogger(logger);
 
             string absoluteStlPath = Path.GetFullPath(config.StlFile);
 
-            //logger?.Invoke($"[C#] Rc before GenerateGraph = {other.Rc}");
             IntPtr ptr = GraphEngineAPI.GenerateGraph(
                 actualTrhistPath,
                 absoluteStlPath,
@@ -148,14 +159,17 @@ namespace DynaOrchestrator.Core
 
                 var (rows, cols, weights, features, attrs11) = ExtractManagedGraphData(data);
 
+                if (data.feature_dim != 5)
+                    throw new Exception($"DLL 返回的 x 特征维度不是 5，而是 {data.feature_dim}");
+
                 if (data.attr_dim != 11)
                     throw new Exception($"DLL 返回的 node_attr 维度不是 11，而是 {data.attr_dim}");
 
-                int newAttrDim = data.attr_dim;
+                int attrDim = data.attr_dim;
 
                 const float arrivalThresholdPa = 1e-7f;
 
-                // 提取工程响应标签
+                // 提取工程响应标签。当前采用方案 B：保留 4 个 engineering head 标签，便于后续扩展。
                 var labels = EngineeringLabelExtractor.Extract(
                     actualTrhistPath,
                     features,
@@ -166,17 +180,15 @@ namespace DynaOrchestrator.Core
                     pressureDimIndex: 4,
                     arrivalThreshold: arrivalThresholdPa);
 
-                string labelsMetaJson = EngineeringLabelExtractor.BuildMetadataJson(labels.Metadata);
-
                 // 近壁 / 近棱 / 近角语义标签
                 float[] nearWallFlag = BuildBinarySemanticFlag(
-                    attrs11, data.num_nodes, newAttrDim, attrIndex: 8, threshold: (float)other.WallMargin);
+                    attrs11, data.num_nodes, attrDim, attrIndex: 8, threshold: (float)other.WallMargin);
 
                 float[] nearEdgeFlag = BuildBinarySemanticFlag(
-                    attrs11, data.num_nodes, newAttrDim, attrIndex: 9, threshold: (float)other.WallMargin);
+                    attrs11, data.num_nodes, attrDim, attrIndex: 9, threshold: (float)other.WallMargin);
 
                 float[] nearCornerFlag = BuildBinarySemanticFlag(
-                    attrs11, data.num_nodes, newAttrDim, attrIndex: 10, threshold: (float)other.WallMargin);
+                    attrs11, data.num_nodes, attrDim, attrIndex: 10, threshold: (float)other.WallMargin);
 
                 int[] samplingRegionId = BuildSamplingRegionId(
                     nearWallFlag,
@@ -184,84 +196,16 @@ namespace DynaOrchestrator.Core
                     nearCornerFlag,
                     data.num_nodes);
 
-                // case 级统计摘要
-                double peakMax = labels.PeakOverpressure.Length > 0 ? labels.PeakOverpressure.Max() : 0.0;
-                double peakMean = labels.PeakOverpressure.Length > 0 ? labels.PeakOverpressure.Average() : 0.0;
+                // 直接导出 case 级条件向量
+                float[] caseCond = BuildCaseConditionVector(record);
 
-                var validArrivalTimes = labels.ArrivalTime.Where(t => t >= 0.0f).ToArray();
-
-                double arrivalMin = validArrivalTimes.Length > 0 ? validArrivalTimes.Min() : -1.0;
-                double arrivalMax = validArrivalTimes.Length > 0 ? validArrivalTimes.Max() : -1.0;
-
-                double impulseMax = labels.PositiveImpulse.Length > 0 ? labels.PositiveImpulse.Max() : 0.0;
-                double durationMax = labels.PositiveDuration.Length > 0 ? labels.PositiveDuration.Max() : 0.0;
-
-                int noArrivalNodeCount = labels.ArrivalTime.Count(t => t < 0.0f);
-                double noArrivalNodeRatio = data.num_nodes > 0 ? (double)noArrivalNodeCount / data.num_nodes : 0.0;
-
-                string caseMetadataJson = BuildCaseMetadataJson(
-                    config,
-                    exp,
-                    other,
-                    actualTrhistPath,
-                    data.num_nodes,
-                    data.num_edges,
-                    data.time_steps,
-                    data.feature_dim,
-                    newAttrDim,
-                    peakMax,
-                    peakMean,
-                    arrivalMin,
-                    arrivalMax,
-                    impulseMax,
-                    durationMax,
-                    arrivalThresholdPa,
-                    noArrivalNodeCount,
-                    noArrivalNodeRatio);
-
-                string featureMetaJson = BuildFeatureMetaJson(data.feature_dim);
-
-                string configSnapshotJson = JsonSerializer.Serialize(
-                    new AppConfig
-                    {
-                        Pipeline = config,
-                        Explosive = exp,
-                        Other = other
-                    },
-                    new JsonSerializerOptions
-                    {
-                        WriteIndented = true
-                    });
-
-                string graphMetaJson = NpzWriter.BuildGraphMetaJson(data.num_edges, other.Rc, other.Alpha);
-
-                // 数值质量诊断
-                var qualityReport = NumericalQualityAnalyzer.Analyze(
+                // 严格执行 STGNS-v1 当前训练链路所需的一致性校验
+                ValidateStgnsV1Export(
                     rows,
                     cols,
                     weights,
                     features,
                     attrs11,
-                    labels.Time,
-                    labels,
-                    data.num_nodes,
-                    data.num_edges,
-                    data.time_steps,
-                    data.feature_dim,
-                    newAttrDim,
-                    arrivalThresholdPa);
-
-                string qualityReportJson = NumericalQualityAnalyzer.BuildJson(qualityReport);
-
-                // 保存 NPZ
-                NpzWriter.Save(
-                    config.NpzOutputFile,
-                    rows,
-                    cols,
-                    weights,
-                    features,
-                    attrs11,
-                    labels.Time,
                     labels.PeakOverpressure,
                     labels.ArrivalTime,
                     labels.PositiveImpulse,
@@ -270,17 +214,33 @@ namespace DynaOrchestrator.Core
                     nearEdgeFlag,
                     nearCornerFlag,
                     samplingRegionId,
-                    labelsMetaJson,
-                    caseMetadataJson,
-                    featureMetaJson,
-                    configSnapshotJson,
-                    graphMetaJson,
-                    qualityReportJson,
-                    (float)other.WallMargin,
+                    caseCond,
                     data.num_nodes,
                     data.time_steps,
                     data.feature_dim,
-                    newAttrDim,
+                    attrDim);
+
+                // 保存 NPZ：只保留 STGNS-v1 主训练链路真正需要的数组文件
+                NpzWriter.Save(
+                    config.NpzOutputFile,
+                    rows,
+                    cols,
+                    weights,
+                    features,
+                    attrs11,
+                    labels.PeakOverpressure,
+                    labels.ArrivalTime,
+                    labels.PositiveImpulse,
+                    labels.PositiveDuration,
+                    nearWallFlag,
+                    nearEdgeFlag,
+                    nearCornerFlag,
+                    samplingRegionId,
+                    caseCond,
+                    data.num_nodes,
+                    data.time_steps,
+                    data.feature_dim,
+                    attrDim,
                     logger);
             }
             finally
@@ -349,6 +309,135 @@ namespace DynaOrchestrator.Core
                 throw new Exception("node_attrs 空指针");
         }
 
+        /// <summary>
+        /// 构建 STGNS-v1 当前训练链路使用的 case 条件向量。
+        /// 顺序固定为：
+        /// [charge_x_m, charge_y_m, charge_z_m, room_L_m, room_W_m, room_H_m, charge_scale]
+        ///
+        /// 这里的 charge_scale 明确定义为 W^(1/3)，单位 kg^(1/3)，与 node_attr 中的 W_cbrt 保持一致。
+        /// record.X / Y / Z 采用绝对坐标，单位 mm；导出到 case_cond 时统一转换为 m。
+        /// </summary>
+        private static float[] BuildCaseConditionVector(BatchCaseRecord record)
+        {
+            return new[]
+            {
+                (float)(record.X * 0.001),
+                (float)(record.Y * 0.001),
+                (float)(record.Z * 0.001),
+                (float)record.L,
+                (float)record.W,
+                (float)record.H,
+                (float)Math.Pow(record.ChargeMass, 1.0 / 3.0)};
+        }
+
+        /// <summary>
+        /// 对导出的最小化 NPZ 结构执行严格校验，确保与 STGNS-v1 Python 主训练链路一致。
+        /// </summary>
+        private static void ValidateStgnsV1Export(
+            int[] rows,
+            int[] cols,
+            float[] weights,
+            float[] features,
+            float[] attrs,
+            float[] pMax,
+            float[] tArrival,
+            float[] positiveImpulse,
+            float[] positiveDuration,
+            float[] nearWallFlag,
+            float[] nearEdgeFlag,
+            float[] nearCornerFlag,
+            int[] samplingRegionId,
+            float[] caseCond,
+            int numNodes,
+            int timeSteps,
+            int featureDim,
+            int attrDim)
+        {
+            if (rows.Length != cols.Length || rows.Length != weights.Length)
+                throw new InvalidOperationException("边数组长度不一致：edge_index_row / edge_index_col / edge_weight 必须同长。");
+
+            if (features.Length != numNodes * timeSteps * featureDim)
+                throw new InvalidOperationException("x.npy 数据长度与 (N,T,D) 不匹配。");
+
+            if (attrs.Length != numNodes * attrDim)
+                throw new InvalidOperationException("node_attr.npy 数据长度与 (N,attr_dim) 不匹配。");
+
+            if (featureDim != 5)
+                throw new InvalidOperationException($"x.npy 的最后一维必须恒为 5，当前为 {featureDim}。");
+
+            if (attrDim != 11)
+                throw new InvalidOperationException($"node_attr.npy 的最后一维必须恒为 11，当前为 {attrDim}。");
+
+            ValidateNodeArrayLength(nearWallFlag, numNodes, nameof(nearWallFlag));
+            ValidateNodeArrayLength(nearEdgeFlag, numNodes, nameof(nearEdgeFlag));
+            ValidateNodeArrayLength(nearCornerFlag, numNodes, nameof(nearCornerFlag));
+            ValidateNodeArrayLength(samplingRegionId, numNodes, nameof(samplingRegionId));
+            ValidateNodeArrayLength(pMax, numNodes, nameof(pMax));
+            ValidateNodeArrayLength(tArrival, numNodes, nameof(tArrival));
+            ValidateNodeArrayLength(positiveImpulse, numNodes, nameof(positiveImpulse));
+            ValidateNodeArrayLength(positiveDuration, numNodes, nameof(positiveDuration));
+
+            if (caseCond.Length != 7)
+                throw new InvalidOperationException("case_cond.npy 的长度必须恒为 7。");
+
+            EnsureEdgeIndicesInRange(rows, cols, numNodes);
+
+            EnsureFinite(weights, nameof(weights));
+            EnsureFinite(features, nameof(features));
+            EnsureFinite(attrs, nameof(attrs));
+            EnsureFinite(pMax, nameof(pMax));
+            EnsureFinite(tArrival, nameof(tArrival));
+            EnsureFinite(positiveImpulse, nameof(positiveImpulse));
+            EnsureFinite(positiveDuration, nameof(positiveDuration));
+            EnsureFinite(nearWallFlag, nameof(nearWallFlag));
+            EnsureFinite(nearEdgeFlag, nameof(nearEdgeFlag));
+            EnsureFinite(nearCornerFlag, nameof(nearCornerFlag));
+            EnsureFinite(caseCond, nameof(caseCond));
+
+            for (int i = 0; i < numNodes; i++)
+            {
+                bool isCorner = nearCornerFlag[i] > 0.5f;
+                bool isEdge = nearEdgeFlag[i] > 0.5f;
+                bool isWall = nearWallFlag[i] > 0.5f;
+
+                int expectedRegionId = isCorner ? 3 : isEdge ? 2 : isWall ? 1 : 0;
+                int actualRegionId = samplingRegionId[i];
+
+                if (actualRegionId < 0 || actualRegionId > 3)
+                    throw new InvalidOperationException($"sampling_region_id[{i}] 超出合法范围 [0,3]，当前值={actualRegionId}。");
+
+                if (actualRegionId != expectedRegionId)
+                    throw new InvalidOperationException($"sampling_region_id 与 near_*_flag 语义不一致，节点 {i} 期望 {expectedRegionId}，实际 {actualRegionId}。");
+            }
+        }
+
+        private static void ValidateNodeArrayLength<T>(T[] values, int numNodes, string name)
+        {
+            if (values.Length != numNodes)
+                throw new InvalidOperationException($"{name} 长度必须等于 num_nodes，当前 {values.Length} != {numNodes}。");
+        }
+
+        private static void EnsureEdgeIndicesInRange(int[] rows, int[] cols, int numNodes)
+        {
+            for (int i = 0; i < rows.Length; i++)
+            {
+                if (rows[i] < 0 || rows[i] >= numNodes)
+                    throw new InvalidOperationException($"edge_index_row[{i}] 越界，当前值={rows[i]}，num_nodes={numNodes}。");
+
+                if (cols[i] < 0 || cols[i] >= numNodes)
+                    throw new InvalidOperationException($"edge_index_col[{i}] 越界，当前值={cols[i]}，num_nodes={numNodes}。");
+            }
+        }
+
+        private static void EnsureFinite(float[] values, string name)
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                if (float.IsNaN(values[i]) || float.IsInfinity(values[i]))
+                    throw new InvalidOperationException($"{name}[{i}] 存在 NaN/Inf。");
+            }
+        }
+
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         private class MEMORYSTATUSEX
         {
@@ -407,230 +496,6 @@ namespace DynaOrchestrator.Core
             {
                 logger?.Invoke("[Warning] 无法读取系统内存状态，将使用配置文件默认值。");
             }
-        }
-
-        private static string BuildFeatureMetaJson(int featureDim)
-        {
-            if (featureDim != 5)
-                throw new InvalidOperationException($"当前仅支持 5 维动态图特征元数据，实际 feature_dim={featureDim}");
-
-            var meta = new
-            {
-                name = "x",
-                shape = new[] { "num_nodes", "time_steps", "5" },
-                fields = new object[]
-                {
-                    new { index = 0, name = "rho", unit = "kg/m^3", description = "air density" },
-                    new { index = 1, name = "vx", unit = "m/s", description = "x velocity" },
-                    new { index = 2, name = "vy", unit = "m/s", description = "y velocity" },
-                    new { index = 3, name = "vz", unit = "m/s", description = "z velocity" },
-                    new { index = 4, name = "overpressure", unit = "Pa", description = "overpressure = raw_pressure - P0" }
-                }
-            };
-
-            return JsonSerializer.Serialize(meta, new JsonSerializerOptions
-            {
-                WriteIndented = true
-            });
-        }
-
-        private static string BuildCaseMetadataJson(
-            PipelineConfig config,
-            ExplosiveParams exp,
-            OtherConfig other,
-            string actualTrhistPath,
-            int numNodes,
-            int numEdges,
-            int timeSteps,
-            int featureDim,
-            int attrDim,
-            double peakMax,
-            double peakMean,
-            double arrivalMin,
-            double arrivalMax,
-            double impulseMax,
-            double durationMax,
-            float arrivalThresholdPa,
-            int noArrivalNodeCount,
-            double noArrivalNodeRatio)
-        {
-            var meta = new
-            {
-                dataset_spec = new
-                {
-                    case_id = config.CaseId,
-                    dataset_version = config.DatasetVersion,
-                    generator = "DynaOrchestrator.Core",
-                    generation_time_utc = DateTime.UtcNow.ToString("O"),
-                    graph_feature_layout = new[] { "rho", "vx", "vy", "vz", "overpressure" },
-                    node_attr_layout = new[] { "x", "y", "z", "d", "nx", "ny", "nz", "W_cbrt", "d_wall", "d_edge", "d_corner" },
-                    engineering_label_names = new[] { "p_max", "t_arrival", "positive_impulse", "positive_duration" },
-
-                    dataset_layers = new
-                    {
-                        graph_topology = new[]
-                        {
-                            "edge_index_row.npy",
-                            "edge_index_col.npy",
-                            "edge_weight.npy",
-                            "graph_meta.json"
-                        },
-                        dynamic_field = new[]
-                        {
-                            "x.npy",
-                            "time.npy",
-                            "feature_meta.json"
-                        },
-                        static_prior = new[]
-                        {
-                            "node_attr.npy",
-                            "node_attr_meta.json",
-                            "near_wall_flag.npy",
-                            "near_edge_flag.npy",
-                            "near_corner_flag.npy",
-                            "sampling_region_id.npy",
-                            "sampling_semantics_meta.json"
-                        },
-                        engineering_labels = new[]
-                        {
-                            "p_max.npy",
-                            "t_arrival.npy",
-                            "positive_impulse.npy",
-                            "positive_duration.npy",
-                            "engineering_labels_meta.json"
-                        },
-                        case_metadata = new[]
-                        {
-                            "case_metadata.json",
-                            "config_snapshot.json",
-                            "quality_report.json"
-                        }
-                    }
-                },
-
-                source_files = new
-                {
-                    base_k_file = config.BaseKFile,
-                    stl_file = config.StlFile,
-                    output_k_file = config.OutputKFile,
-                    trhist_file = actualTrhistPath,
-                    npz_output_file = config.NpzOutputFile
-                },
-
-                scenario = new
-                {
-                    charge_center_mm = new[] { exp.Xc, exp.Yc, exp.Zc },
-                    charge_center_m = new[] { exp.Xc * 0.001, exp.Yc * 0.001, exp.Zc * 0.001 },
-                    charge_radius_mm = exp.Radius,
-                    charge_mass_kg = exp.W,
-                    rc_m = other.Rc,
-                    alpha = other.Alpha,
-                    dl_dense_m = other.DlDense,
-                    sparse_factor = other.SparseFactor,
-                    core_radius_multiplier = other.CoreRadiusMultiplier,
-                    wall_margin_m = other.WallMargin
-                },
-
-                sampling_semantics = new
-                {
-                    wall_margin_m = other.WallMargin,
-                    near_wall_rule = "d_wall <= wall_margin_m",
-                    near_edge_rule = "d_edge <= wall_margin_m",
-                    near_corner_rule = "d_corner <= wall_margin_m",
-                    sampling_region_id_definition = new
-                    {
-                        regular = 0,
-                        near_wall = 1,
-                        near_edge = 2,
-                        near_corner = 3
-                    }
-                },
-
-                design_factors = new
-                {
-                    room_geometry_type = "sealed_rigid_rectangular_room",
-                    charge_position_type = "user_defined",
-                    charge_mass_kg = exp.W,
-                    charge_radius_mm = exp.Radius,
-                    graph_radius_m = other.Rc,
-                    sampling_dense_step_m = other.DlDense,
-                    sparse_factor = other.SparseFactor,
-                    wall_margin_m = other.WallMargin,
-                    core_radius_multiplier = other.CoreRadiusMultiplier
-                },
-
-                graph_construction = new
-                {
-                    graph_builder = "radius graph with LoS visibility constraint",
-                    edge_storage = "directed COO",
-                    edge_count_semantics = "num_edges counts directed edges actually stored in edge_index_row/col",
-                    edge_weight_definition = "heuristic spatial proximity weight: exp(-alpha * distance)",
-                    edge_weight_role = "graph connectivity prior, not a physical propagation coefficient",
-
-                    stl_role = new[]
-                    {
-                        "closed-domain identification",
-                        "wall-distance recovery",
-                        "sampling near wall"
-                    },
-
-                    los_role = "graph edge visibility constraint",
-                    research_positioning = "auxiliary geometric preprocessing rather than core methodological contribution",
-
-                    parameters = new
-                    {
-                        rc_m = other.Rc,
-                        alpha = other.Alpha
-                    }
-                },
-
-                numerical_reliability = new
-                {
-                    trhist_dt_s = other.TrhistDt,
-                    lsdyna_ncpu = config.Ncpu,
-                    lsdyna_memory = config.Memory,
-                    pressure_feature_dim_index = 4,
-                    arrival_threshold_pa = arrivalThresholdPa,
-                    overpressure_definition = "overpressure = raw_pressure - P0",
-                    positive_phase_rule = "overpressure >= arrival_threshold_pa",
-                    impulse_rule = "time_integral_of_max(overpressure - arrival_threshold_pa, 0)",
-                    duration_rule = "time_duration_where_overpressure >= arrival_threshold_pa_using_piecewise_linear_crossing"
-                },
-
-                units = new
-                {
-                    coordinate = "m",
-                    distance = "m",
-                    velocity = "m/s",
-                    density = "kg/m^3",
-                    time = "s",
-                    pressure = "Pa",
-                    mass = "kg",
-                    edge_weight = "1"
-                },
-
-                case_statistics = new
-                {
-                    num_nodes = numNodes,
-                    num_edges = numEdges,
-                    time_steps = timeSteps,
-                    feature_dim = featureDim,
-                    attr_dim = attrDim,
-                    peak_overpressure_global_max = peakMax,
-                    peak_overpressure_global_mean = peakMean,
-                    arrival_time_min = arrivalMin,
-                    arrival_time_max = arrivalMax,
-                    no_arrival_node_count = noArrivalNodeCount,
-                    no_arrival_node_ratio = noArrivalNodeRatio,
-                    positive_impulse_global_max = impulseMax,
-                    positive_duration_global_max = durationMax
-                }
-            };
-
-            return JsonSerializer.Serialize(meta, new JsonSerializerOptions
-            {
-                WriteIndented = true
-            });
         }
 
         private static float[] BuildBinarySemanticFlag(

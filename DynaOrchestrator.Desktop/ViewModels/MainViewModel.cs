@@ -7,7 +7,6 @@ using System.Text.Json;
 using System.Threading;
 using System.Windows;
 
-// 引入更新后的核心库命名空间
 using DynaOrchestrator.Core.Batch;
 using DynaOrchestrator.Core.Models;
 
@@ -18,21 +17,15 @@ namespace DynaOrchestrator.Desktop.ViewModels
         // 全局基础配置
         private AppConfig _baseConfig = new AppConfig();
 
+        // 示例集合
         public ObservableCollection<BatchCaseRecord> Cases { get; set; } = new ObservableCollection<BatchCaseRecord>();
+        // 日志集合
         public ObservableCollection<LogMessage> Logs { get; set; } = new ObservableCollection<LogMessage>();
 
-        // --- 绑定到 UI 的全局执行参数 ---
-        public int MaxParallelCases
-        {
-            get => _baseConfig.Workspace.MaxParallelCases;
-            set { _baseConfig.Workspace.MaxParallelCases = value; OnPropertyChanged(); }
-        }
-
-        public int NcpuPerCase
-        {
-            get => _baseConfig.Workspace.NcpuPerCase;
-            set { _baseConfig.Workspace.NcpuPerCase = value; OnPropertyChanged(); }
-        }
+        // 取消令牌
+        private CancellationTokenSource? _cts;
+        // 配置文件信息
+        private readonly string _configPath = "config.json";
 
         // --- 动态读取 Config 中的路径配置 ---
         public string WorkspaceRootDir
@@ -47,7 +40,29 @@ namespace DynaOrchestrator.Desktop.ViewModels
             set { _baseConfig.Workspace.CasesCsv = value; OnPropertyChanged(); }
         }
 
+        // --- 绑定到 UI 的全局执行参数 ---
+        public int MaxParallelCases
+        {
+            get => _baseConfig.Workspace.MaxParallelCases;
+            set { _baseConfig.Workspace.MaxParallelCases = value; OnPropertyChanged(); }
+        }
+
+        public int NcpuPerCase
+        {
+            get => _baseConfig.Workspace.NcpuPerCase;
+            set { _baseConfig.Workspace.NcpuPerCase = value; OnPropertyChanged(); }
+        }
+
+        public string MemoryPerCase
+        {
+            get => _baseConfig.Workspace.MemoryPerCase;
+            set { _baseConfig.Workspace.MemoryPerCase = value; OnPropertyChanged(); }
+        }
+
         private bool _isRunning;
+        /// <summary>
+        ///  用于更新按钮状态
+        /// </summary>
         public bool IsRunning
         {
             get => _isRunning;
@@ -57,9 +72,6 @@ namespace DynaOrchestrator.Desktop.ViewModels
         public RelayCommand StartCommand { get; }
         public RelayCommand StopCommand { get; }
         public RelayCommand LoadCsvCommand { get; }
-
-        private CancellationTokenSource? _cts;
-        private readonly string _configPath = "config.json";
 
         public MainViewModel()
         {
@@ -71,9 +83,14 @@ namespace DynaOrchestrator.Desktop.ViewModels
             LoadBaseConfig();
         }
 
+        /// <summary>
+        /// 加载全局配置信息
+        /// </summary>
         private void LoadBaseConfig()
         {
+            // 获取可执行文件所在目录
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            // 拼接全局配置文件路径（配置文件默认与可执行文件在同一目录）
             string fullConfigPath = Path.Combine(baseDir, _configPath);
 
             if (File.Exists(fullConfigPath))
@@ -95,12 +112,16 @@ namespace DynaOrchestrator.Desktop.ViewModels
             }
 
             // 触发属性变更，让 UI 文本框显示从 Config 读取到的路径与参数
-            OnPropertyChanged(nameof(MaxParallelCases));
-            OnPropertyChanged(nameof(NcpuPerCase));
             OnPropertyChanged(nameof(WorkspaceRootDir));
             OnPropertyChanged(nameof(CasesCsvPath));
+            OnPropertyChanged(nameof(MaxParallelCases));
+            OnPropertyChanged(nameof(NcpuPerCase));
+            OnPropertyChanged(nameof(MemoryPerCase));
         }
 
+        /// <summary>
+        /// 加载 CSV 文件，并更新 Cases 集合
+        /// </summary>
         private void LoadCsv()
         {
             try
@@ -145,6 +166,9 @@ namespace DynaOrchestrator.Desktop.ViewModels
             }
         }
 
+        /// <summary>
+        /// 启动批处理任务
+        /// </summary>
         private async void StartBatch()
         {
             // --- 1. 运行前状态重置 ---
@@ -167,12 +191,12 @@ namespace DynaOrchestrator.Desktop.ViewModels
             try
             {
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                // 在启动批处理任务之前，LoadCsv 方法中已经进行空值检查，因此这里不再重复检查
                 string workspaceRoot = Path.GetFullPath(Path.Combine(baseDir, WorkspaceRootDir));
                 string fullCsvPath = Path.GetFullPath(Path.Combine(workspaceRoot, CasesCsvPath));
 
-                // 仅将状态为 Pending 的记录提交给 BatchRunner 
-                // 或者由 BatchRunner 内部识别 Status 进行过滤
-                var recordList = new System.Collections.Generic.List<BatchCaseRecord>(Cases);
+                // 由 BatchRunner 内部识别 Status 进行过滤，即仅执行状态为 Pending 的记录
+                var recordList = new List<BatchCaseRecord>(Cases);
 
                 await Task.Run(() =>
                 {
@@ -182,9 +206,18 @@ namespace DynaOrchestrator.Desktop.ViewModels
                         baseConfig: _baseConfig,
                         maxParallelCases: MaxParallelCases,
                         ncpuPerCase: NcpuPerCase,
-                        memoryPerCase: _baseConfig.Workspace.MemoryPerCase,
+                        memoryPerCase: MemoryPerCase,
                         records: recordList,
                         logger: msg => Application.Current.Dispatcher.Invoke(() => AppendLog(msg)),
+                        uiStateUpdater: (record, status, completed, lastRunTime) =>
+                        {
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                record.Status = status;
+                                record.Completed = completed;
+                                record.LastRunTime = lastRunTime;
+                            });
+                        },
                         cancellationToken: _cts.Token
                     );
                 });
@@ -202,8 +235,13 @@ namespace DynaOrchestrator.Desktop.ViewModels
 
         private void StopBatch()
         {
-            AppendLog("[UI] 用户正在请求取消任务，等待当前进行中的工况安全中断...");
+            AppendLog("[UI] 用户请求立即停止任务，准备终止所有正在运行的 LS-DYNA 进程...");
+
+            // 先发出取消信号，阻止后续新任务继续进入执行阶段
             _cts?.Cancel();
+
+            // 再直接杀死所有已经启动的求解器进程
+            BatchRunner.ForceStopAllRunningCases(msg => AppendLog(msg));
         }
 
         private void AppendLog(string message)

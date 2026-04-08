@@ -29,8 +29,11 @@
                     <TextBlock Text="LS-DYNA 分配核心数:" VerticalAlignment="Center" Margin="0,0,5,0"/>
                     <TextBox Text="{Binding NcpuPerCase, UpdateSourceTrigger=PropertyChanged}" Width="50" VerticalContentAlignment="Center" Margin="0,0,30,0"/>
 
-                    <Button Content="▶ 开始批处理" Command="{Binding StartCommand}" Width="120" Background="#4CAF50" Foreground="White" FontWeight="Bold" Margin="0,0,10,0"/>
-                    <Button Content="■ 停止任务" Command="{Binding StopCommand}" Width="100" Background="#F44336" Foreground="White" FontWeight="Bold"/>
+                    <TextBlock Text="LS-DYNA 分配内存大小:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <TextBox Text="{Binding MemoryPerCase, UpdateSourceTrigger=PropertyChanged}" Width="50" VerticalContentAlignment="Center" Margin="0,0,30,0" ToolTip="格式必须为 400m 的形式"/>
+
+                    <Button Content="开始批处理" Command="{Binding StartCommand}" Width="100" Background="#4CAF50" Foreground="White" FontWeight="Bold" Margin="0,0,10,0"/>
+                    <Button Content="停止任务" Command="{Binding StopCommand}" Width="100" Background="#F44336" Foreground="White" FontWeight="Bold"/>
                 </StackPanel>
             </StackPanel>
         </GroupBox>
@@ -47,7 +50,7 @@
 
                 <DataGridTextColumn Header="装药位置" Binding="{Binding PositionType}" Width="80"/>
                 <DataGridTextColumn Header="装药量(kg)" Binding="{Binding ChargeMass}" Width="80"/>
-                <DataGridTextColumn Header="装药密度(kg/m3)" Binding="{Binding ChargeDensity}" Width="100"/>
+                <DataGridTextColumn Header="装药密度(kg/m3)" Binding="{Binding ChargeDensity}" Width="110"/>
                 <DataGridTextColumn Header="爆源坐标 (X,Y,Z)" Binding="{Binding AbsPositionDisplay}" Width="140"/>
 
                 <DataGridTemplateColumn Header="运行状态" Width="90">

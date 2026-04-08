@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DynaOrchestrator.Core.Solver;
 
 namespace DynaOrchestrator.Core.Batch
 {
@@ -35,6 +36,7 @@ namespace DynaOrchestrator.Core.Batch
             string memoryPerCase,
             List<BatchCaseRecord> records,
             Action<string> logger,
+            Action<BatchCaseRecord, string, string, string>? uiStateUpdater = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(batchRoot))
@@ -60,41 +62,50 @@ namespace DynaOrchestrator.Core.Batch
             logger($"[Batch] 接收到 {records.Count} 条工况。");
 
             var distinctStages = records
-                .Select(r => r.DatasetStage)
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+                .Select(r => r.DatasetStage)    // 选择所有 records 中的 DatasetStage 字段
+                .Where(s => !string.IsNullOrWhiteSpace(s)) // 排除空值
+                .Distinct(StringComparer.OrdinalIgnoreCase) // 忽略大小写比较
+                .ToList(); // 转换为 List
 
+            // 如果存在不同 DatasetStage 的记录，则抛出异常
             if (distinctStages.Count != 1)
                 throw new Exception("当前要求同一批次 CSV 中所有记录必须属于同一个 DatasetStage。");
 
+            // 获取同一 DatasetStage 下的所有记录
             string datasetStage = distinctStages[0];
+            // 创建总结目录，用于统计结果
             string summaryDir = Path.Combine(fullBatchRoot, "runs", datasetStage, "summary");
             Directory.CreateDirectory(summaryDir);
 
             // 筛选出未完成的工况
             var pendingRecords = records.Where(r => !r.IsCompleted).ToList();
             logger($"[Batch] 未完成工况数: {pendingRecords.Count}");
-
+            // 如果没有可执行工况，则直接返回
             if (pendingRecords.Count == 0)
             {
                 logger("[Batch] 所有工况均已完成，无需重复执行。");
                 return;
             }
 
+            // 线程安全的结果集合
             var results = new ConcurrentBag<BatchRunResult>();
+            // 创建信号量，限制并发数
+            // 第一个参数表示初始信号量的计数，第二个参数表示最大信号量计数
             var semaphore = new SemaphoreSlim(maxParallelCases, maxParallelCases);
 
             // 构建并发任务
             var tasks = pendingRecords.Select(async record =>
             {
-                await semaphore.WaitAsync(cancellationToken);
+                bool semaphoreAcquired = false;
+
                 try
                 {
-                    // 检查是否收到了来自 UI 的取消请求
+                    // 等待信号量，直到有可用资源，即任一任务完成或被取消时开始执行
+                    await semaphore.WaitAsync(cancellationToken);
+                    semaphoreAcquired = true;
+
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // 【核心修复】：使用 Task.Run 将长耗时的阻塞操作丢到后台线程池
                     BatchRunResult result = await Task.Run(() =>
                     {
                         return RunSingleCase(
@@ -104,20 +115,39 @@ namespace DynaOrchestrator.Core.Batch
                             baseConfig,
                             ncpuPerCase,
                             memoryPerCase,
-                            logger);
-                    });
+                            logger,
+                            uiStateUpdater,
+                            cancellationToken);
+                    }, cancellationToken);
 
                     results.Add(result);
                 }
+                // 如果捕获到取消异常
                 catch (OperationCanceledException)
                 {
-                    // 捕获取消异常，更新状态以通知 UI
-                    record.Status = "Canceled";
+                    UpdateRuntimeState(record, "Canceled", "0", uiStateUpdater);
+
+                    if (!string.IsNullOrWhiteSpace(fullCsvPath))
+                        CaseCsvWriter.MarkCanceled(fullCsvPath, record.CaseId);
+
+                    results.Add(new BatchRunResult
+                    {
+                        CaseId = record.CaseId,
+                        GeomType = record.GeomType,
+                        DatasetStage = record.DatasetStage,
+                        Status = "canceled",
+                        Message = "Canceled before execution",
+                        ExitCode = -2,
+                        StartTime = DateTime.Now,
+                        EndTime = DateTime.Now
+                    });
+
                     logger($"[Batch] 工况 {record.CaseId} 被用户取消。");
                 }
                 finally
                 {
-                    semaphore.Release();
+                    if (semaphoreAcquired)
+                        semaphore.Release();
                 }
             }).ToArray();
 
@@ -128,12 +158,14 @@ namespace DynaOrchestrator.Core.Batch
                 .OrderBy(r => r.CaseId, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
+            // 写入总结文件
             WriteSummaryFiles(summaryDir, orderedResults, datasetStage);
 
             int successCount = orderedResults.Count(r => string.Equals(r.Status, "success", StringComparison.OrdinalIgnoreCase));
-            int failedCount = orderedResults.Count - successCount;
+            int canceledCount = orderedResults.Count(r => string.Equals(r.Status, "canceled", StringComparison.OrdinalIgnoreCase));
+            int failedCount = orderedResults.Count(r => string.Equals(r.Status, "failed", StringComparison.OrdinalIgnoreCase));
 
-            logger($"[Batch] 批处理完成。成功 {successCount} 条，失败 {failedCount} 条。");
+            logger($"[Batch] 批处理完成。成功 {successCount} 条，取消 {canceledCount} 条，失败 {failedCount} 条。");
             logger($"[Batch] 汇总目录: {summaryDir}");
         }
 
@@ -147,34 +179,38 @@ namespace DynaOrchestrator.Core.Batch
             AppConfig baseConfig,
             int ncpuPerCase,
             string memoryPerCase,
-            Action<string> logger)
+            Action<string> logger,
+            Action<BatchCaseRecord, string, string, string>? uiStateUpdater,
+            CancellationToken cancellationToken)
         {
+            // 构建工况目录
+            var paths = new BatchCasePaths(batchRoot, record);
+            // 声明结果
             var result = new BatchRunResult
             {
                 CaseId = record.CaseId,
                 GeomType = record.GeomType,
                 DatasetStage = record.DatasetStage,
+                InputDir = paths.InputDir,
+                OutputDir = paths.OutputDir,
                 StartTime = DateTime.Now
             };
-
-            var paths = new BatchCasePaths(batchRoot, record);
-            result.InputDir = paths.InputDir;
-            result.OutputDir = paths.OutputDir;
 
             try
             {
                 logger($"\n[Batch] 开始工况: {record.CaseId}");
 
                 // 1. 直接更新对象的属性，触发 INotifyPropertyChanged 通知 WPF 界面刷新
-                record.Status = "Running";
-                record.Completed = "0";
-                record.LastRunTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                UpdateRuntimeState(record, "Running", "0", uiStateUpdater);
 
-                // 2. 依然同步更新 CSV 文件以备不时之需（断电等）
+                // 2. 同步更新 CSV 文件
                 if (!string.IsNullOrWhiteSpace(casesCsvPath))
                     CaseCsvWriter.MarkRunning(casesCsvPath, record.CaseId);
 
+                // 重新创建工况目录
+                // 此处后续可优化，第三阶段任务失败时，不需要重新创建工况目录，此目录仅用于第一、二阶段
                 RecreateCaseDirectory(paths);
+                // 拷贝 k文件、模型文件到工况目录
                 paths.CopyBaseFilesToInput(overwrite: true);
 
                 AppConfig caseConfig = BatchConfigBuilder.Build(
@@ -189,27 +225,42 @@ namespace DynaOrchestrator.Core.Batch
                 WriteCaseMetadata(paths.LocalCaseMetadataFile, record, paths);
 
                 // 3. 执行单工况流水线，并将 logger 向下传递给 LS-DYNA 和 C++ 引擎的包装层
-                PipelineExecutor.Execute(caseConfig, optimizeHardwareResources: false, logger: logger);
+                PipelineExecutor.Execute(
+                    caseConfig,
+                    record,
+                    optimizeHardwareResources: false,
+                    cancellationToken: cancellationToken,
+                    logger: logger);
 
                 // 4. 成功后更新结果及状态
                 result.Status = "success";
                 result.Message = "OK";
                 result.ExitCode = 0;
 
-                record.Status = "Success";
-                record.Completed = "1";
+                UpdateRuntimeState(record, "Success", "1", uiStateUpdater);
                 if (!string.IsNullOrWhiteSpace(casesCsvPath))
                     CaseCsvWriter.MarkSuccess(casesCsvPath, record.CaseId);
             }
+            catch (OperationCanceledException)
+            {
+                result.Status = "canceled";
+                result.Message = "Canceled by user";
+                result.ExitCode = -2;
+
+                UpdateRuntimeState(record, "Canceled", "0", uiStateUpdater);
+
+                if (!string.IsNullOrWhiteSpace(casesCsvPath))
+                    CaseCsvWriter.MarkCanceled(casesCsvPath, record.CaseId);
+
+                logger($"[Batch][取消] {record.CaseId}: 工况已被用户终止。");
+            }
             catch (Exception ex)
             {
-                // 5. 失败后更新结果及状态
                 result.Status = "failed";
                 result.Message = ex.Message;
                 result.ExitCode = -1;
 
-                record.Status = "Failed";
-                record.Completed = "0";
+                UpdateRuntimeState(record, "Failed", "0", uiStateUpdater);
 
                 if (!string.IsNullOrWhiteSpace(casesCsvPath))
                     CaseCsvWriter.MarkFailed(casesCsvPath, record.CaseId);
@@ -222,6 +273,26 @@ namespace DynaOrchestrator.Core.Batch
             }
 
             return result;
+        }
+
+        private static void UpdateRuntimeState(
+            BatchCaseRecord record,
+            string status,
+            string completed,
+            Action<BatchCaseRecord, string, string, string>? uiStateUpdater)
+        {
+            string lastRunTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+
+            if (uiStateUpdater != null)
+            {
+                uiStateUpdater(record, status, completed, lastRunTime);
+            }
+            else
+            {
+                record.Status = status;
+                record.Completed = completed;
+                record.LastRunTime = lastRunTime;
+            }
         }
 
         private static void RecreateCaseDirectory(BatchCasePaths paths)
@@ -334,7 +405,8 @@ namespace DynaOrchestrator.Core.Batch
                 DatasetStage = datasetStage,
                 Total = results.Count,
                 Success = results.Count(r => string.Equals(r.Status, "success", StringComparison.OrdinalIgnoreCase)),
-                Failed = results.Count(r => !string.Equals(r.Status, "success", StringComparison.OrdinalIgnoreCase)),
+                Failed = results.Count(r => string.Equals(r.Status, "failed", StringComparison.OrdinalIgnoreCase)),
+                Canceled = results.Count(r => string.Equals(r.Status, "canceled", StringComparison.OrdinalIgnoreCase)),
                 GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
             };
 
@@ -349,6 +421,15 @@ namespace DynaOrchestrator.Core.Batch
                 return value;
 
             return "\"" + value.Replace("\"", "\"\"") + "\"";
+        }
+
+        /// <summary>
+        /// 取消所有正在运行的案例
+        /// </summary>
+        /// <param name="logger"></param>
+        public static void ForceStopAllRunningCases(Action<string>? logger = null)
+        {
+            LsDynaOrchestrator.KillAllRunningProcesses(logger);
         }
     }
 }
