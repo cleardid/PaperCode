@@ -181,10 +181,21 @@ namespace DynaOrchestrator.Core.Batch
             AppConfig baseConfig,
             int ncpuPerCase,
             string memoryPerCase,
-            Action<string> logger,
+            Action<string> originalLogger,
             Action<BatchCaseRecord, string, string, string>? uiStateUpdater,
             CancellationToken cancellationToken)
         {
+            // 工况 ID 自动前缀包装器
+            Action<string> logger = msg =>
+            {
+                if (string.IsNullOrWhiteSpace(msg)) return;
+
+                string prefix = $"[{record.CaseId}] ";
+                // 兼容多行日志：替换换行符，确保每一行开头都有 ID
+                string formattedMsg = prefix + msg.Replace("\n", "\n" + prefix);
+                originalLogger(formattedMsg);
+            };
+
             // 构建工况目录
             var paths = new BatchCasePaths(batchRoot, record);
             // 声明结果

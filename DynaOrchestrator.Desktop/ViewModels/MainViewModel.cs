@@ -1,4 +1,7 @@
-﻿using System;
+﻿using DynaOrchestrator.Core.Batch;
+using DynaOrchestrator.Core.Models;
+using DynaOrchestrator.Core.Utils;
+using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
@@ -6,9 +9,6 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Windows;
-
-using DynaOrchestrator.Core.Batch;
-using DynaOrchestrator.Core.Models;
 
 namespace DynaOrchestrator.Desktop.ViewModels
 {
@@ -237,6 +237,15 @@ namespace DynaOrchestrator.Desktop.ViewModels
                 // 由 BatchRunner 内部识别 Status 进行过滤，即仅执行状态为 Pending 的记录
                 var recordList = new List<BatchCaseRecord>(Cases);
 
+                // 1. 实例化日志缓冲器，约每 200ms 批量更新一次 UI
+                using var logBuffer = new AsyncLogBuffer(mergedMessages =>
+                {
+                    Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        AppendLog(mergedMessages);
+                    }, System.Windows.Threading.DispatcherPriority.Background);
+                }, flushIntervalMs: 200);
+
                 await Task.Run(() =>
                 {
                     return BatchRunner.RunAsync(
@@ -247,19 +256,23 @@ namespace DynaOrchestrator.Desktop.ViewModels
                         ncpuPerCase: NcpuPerCase,
                         memoryPerCase: MemoryPerCase,
                         records: recordList,
-                        logger: msg => Application.Current.Dispatcher.Invoke(() => AppendLog(msg)),
+                        logger: logBuffer.Log, // 2. 核心代码直接将日志写入内存队列，瞬间返回
                         uiStateUpdater: (record, status, completed, lastRunTime) =>
                         {
-                            Application.Current.Dispatcher.Invoke(() =>
+                            // 3. 状态更新改用 InvokeAsync，避免阻塞后台调度线程
+                            Application.Current.Dispatcher.InvokeAsync(() =>
                             {
                                 record.Status = status;
                                 record.Completed = completed;
                                 record.LastRunTime = lastRunTime;
-                            });
+                            }, System.Windows.Threading.DispatcherPriority.Background);
                         },
                         cancellationToken: _cts.Token
                     );
                 });
+
+                // 4. 批处理任务结束后，强制刷出队列中可能残留的最后几条日志
+                logBuffer.FlushNow();
             }
             catch (Exception ex)
             {
