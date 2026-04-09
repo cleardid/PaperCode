@@ -209,31 +209,31 @@ namespace DynaOrchestrator.Core.Batch
                 if (!string.IsNullOrWhiteSpace(casesCsvPath))
                     CaseCsvWriter.MarkRunning(casesCsvPath, record.CaseId);
 
-                // 重新创建工况目录
-                // 此处后续可优化，第三阶段任务失败时，不需要重新创建工况目录，此目录仅用于第一、二阶段
-                RecreateCaseDirectory(paths);
-                // 拷贝 k文件、模型文件到工况目录
-                paths.CopyBaseFilesToInput(overwrite: true);
-
+                // 1. 构建该工况的专属配置
                 AppConfig caseConfig = BatchConfigBuilder.Build(
-                    baseConfig,
-                    record,
-                    paths,
-                    ncpuPerCase,
-                    memoryPerCase,
-                    logger);
+                    baseConfig, record, paths, ncpuPerCase, memoryPerCase, logger);
 
-                // 根据分阶段配置，决定是否重建目录
+                // 基于阶段的文件目录生命周期安全管理
                 if (caseConfig.Pipeline.EnablePreProcessing)
                 {
-                    // 若执行阶段 1，则彻底清空并重新拷贝基础模型
+                    // 场景 A：如果开启了前处理，说明这是一次“全新生成”或“推倒重来”。
+                    // 此时必须彻底清空旧目录，防止历史脏数据干扰。
                     RecreateCaseDirectory(paths);
                     paths.CopyBaseFilesToInput(overwrite: true);
                 }
                 else
                 {
-                    // 若跳过阶段 1，严禁删除现有目录，直接确保基础目录结构存在即可
+                    // 场景 B：如果跳过了前处理（断点续算第二或第三阶段）。
+                    // 绝对禁止调用 RecreateCaseDirectory！仅确保基础目录结构存在。
                     paths.EnsureDirectories();
+
+                    // 【防范隐藏陷阱】：如果用户不小心手动清空了 input 文件夹，
+                    // 第三阶段由于缺少 room.stl 会直接崩溃。这里做静默修复补偿。
+                    if (!File.Exists(paths.LocalStlFile) || !File.Exists(paths.LocalBaseKFile))
+                    {
+                        logger("[Info] 检测到基础输入文件缺失，正在从基础模型库静默补充...");
+                        paths.CopyBaseFilesToInput(overwrite: false);
+                    }
                 }
 
                 BatchConfigBuilder.WriteConfig(caseConfig, paths.LocalConfigFile);
