@@ -82,6 +82,14 @@ namespace DynaOrchestrator.Core.PreProcessing
 
     public static class AdaptiveMeshGenerator
     {
+        /// <summary>
+        /// 辅助结构体，用于保存正反两个方向的交点数
+        /// </summary>
+        private struct BiDirHits
+        {
+            public int Pos;
+            public int Neg;
+        }
 
         // 辅助格式化函数：强制保留1位小数，使用英文小数点，并严格占据10个字符宽度
         private static string Fmt10(double val)
@@ -216,7 +224,6 @@ namespace DynaOrchestrator.Core.PreProcessing
             logger?.Invoke($"[解析] 空间包围盒: X[{box.MinX}, {box.MaxX}], Y[{box.MinY}, {box.MaxY}], Z[{box.MinZ}, {box.MaxZ}]");
             logger?.Invoke($"[解析] 爆炸源中心: ({exp.Xc}, {exp.Yc}, {exp.Zc}), 半径: {exp.Radius} mm");
 
-            //var tracers = GenerateTracers(box, exp, stlMesh, opt, logger);
             // 2. 在开始生成测点前，预先构建加速器（仅耗时数毫秒）
             var accelerator = new MeshAccelerator(stlMesh, box);
             // 然后生成自适应观测点
@@ -319,6 +326,21 @@ namespace DynaOrchestrator.Core.PreProcessing
             // 边界层加密参数 m
             double wallMargin = opt.WallMargin;
 
+            // 自动探测 STL 拓扑类型（基于双向探测精准定位空气空腔）
+            Vector3 expPoint = new Vector3 { X = explosive.Xc, Y = explosive.Yc, Z = explosive.Zc };
+            var expHitsX = CountLineHits(expPoint, new Vector3 { X = 1, Y = 0, Z = 0 }, accelerator, 'X');
+            var expHitsY = CountLineHits(expPoint, new Vector3 { X = 0, Y = 1, Z = 0 }, accelerator, 'Y');
+            var expHitsZ = CountLineHits(expPoint, new Vector3 { X = 0, Y = 0, Z = 1 }, accelerator, 'Z');
+
+            // 如果爆心射出去交点数主要为偶数（且大于0），说明被内外双层墙体包围，属于厚壁实体模型
+            int evenVotes = 0;
+            if (expHitsX.Pos > 0 && expHitsX.Pos % 2 == 0) evenVotes++;
+            if (expHitsY.Pos > 0 && expHitsY.Pos % 2 == 0) evenVotes++;
+            if (expHitsZ.Pos > 0 && expHitsZ.Pos % 2 == 0) evenVotes++;
+
+            bool isThickWalled = evenVotes >= 2;
+            logger?.Invoke($"[拓扑探测] 房间网格被自动识别为: {(isThickWalled ? "厚壁实体模型 (提取双向偶数交点空腔)" : "薄壁单层模型 (提取双向奇数交点空腔)")}");
+
             // 1. 建立空间体素哈希表，用于快速查询“该区域是否有墙”
             // Tuple<int, int, int> 代表网格的三维索引
             HashSet<Int3> wallVoxels = new HashSet<Int3>();
@@ -336,7 +358,14 @@ namespace DynaOrchestrator.Core.PreProcessing
                 for (int x = minX; x <= maxX; x++)
                     for (int y = minY; y <= maxY; y++)
                         for (int z = minZ; z <= maxZ; z++)
-                            wallVoxels.Add(new Int3(x, y, z));
+                        {
+                            // 防止斜向大三角形导致的体素爆炸（Bounding Box过大误封空腔）
+                            Vector3 voxelCenter = new Vector3 { X = (x + 0.5) * dlDense, Y = (y + 0.5) * dlDense, Z = (z + 0.5) * dlDense };
+                            if (PointToTriangleDistance(voxelCenter, tri) <= dlDense * 1.5)
+                            {
+                                wallVoxels.Add(new Int3(x, y, z));
+                            }
+                        }
             }
 
             // 计算边界层加密需要的体素膨胀层数
@@ -359,7 +388,7 @@ namespace DynaOrchestrator.Core.PreProcessing
 
                         // 先判断该点是否位于封闭 STL 内部
                         var p = new Vector3 { X = x, Y = y, Z = z };
-                        if (!IsInsideClosedMesh(p, accelerator))
+                        if (!IsInsideAirCavity(p, accelerator, isThickWalled))
                         {
                             continue;
                         }
@@ -406,77 +435,70 @@ namespace DynaOrchestrator.Core.PreProcessing
         }
 
         /// <summary>
-        /// 判断点是否在封闭 STL 网格内部，核心算法：从点向三个轴向发射射线，统计与 STL 的交点数，投票决定内部/外部
+        /// 利用严格的双向包裹特征判定点是否位于真正的流场空腔内部
         /// </summary>
-        /// <param name="p">要判断的点 </param>
-        /// <param name="stlMesh">STL 网格 </param>
-        /// <returns>如果点在网格内部则返回 true，否则返回 false </returns>
-        private static bool IsInsideClosedMesh(Vector3 p, MeshAccelerator accelerator)
+        private static bool IsInsideAirCavity(Vector3 p, MeshAccelerator accelerator, bool isThickWalled)
         {
-            const double eps = 1e-9;
-            var px = new Vector3 { X = p.X + eps, Y = p.Y + eps, Z = p.Z + eps };
+            var hitsX = CountLineHits(p, new Vector3 { X = 1.0, Y = 0.0, Z = 0.0 }, accelerator, 'X');
+            var hitsY = CountLineHits(p, new Vector3 { X = 0.0, Y = 1.0, Z = 0.0 }, accelerator, 'Y');
+            var hitsZ = CountLineHits(p, new Vector3 { X = 0.0, Y = 0.0, Z = 1.0 }, accelerator, 'Z');
 
-            int intersectionsX = 0, intersectionsY = 0, intersectionsZ = 0;
-
-            // X 轴射线求交
-            var dirX = new Vector3 { X = 1.0, Y = 0.0, Z = 0.0 };
-            foreach (var tri in accelerator.GetCandidatesRayX(px.X, px.Y, px.Z))
-            {
-                if (RayIntersectsTriangle(px, dirX, tri, out double t) && t > eps)
-                    intersectionsX++;
-            }
-
-            // Y 轴射线求交
-            var dirY = new Vector3 { X = 0.0, Y = 1.0, Z = 0.0 };
-            foreach (var tri in accelerator.GetCandidatesRayY(px.X, px.Y, px.Z))
-            {
-                if (RayIntersectsTriangle(px, dirY, tri, out double t) && t > eps)
-                    intersectionsY++;
-            }
-
-            // Z 轴射线求交
-            var dirZ = new Vector3 { X = 0.0, Y = 0.0, Z = 1.0 };
-            foreach (var tri in accelerator.GetCandidatesRayZ(px.X, px.Y, px.Z))
-            {
-                if (RayIntersectsTriangle(px, dirZ, tri, out double t) && t > eps)
-                    intersectionsZ++;
-            }
-
-            // 多数投票原则
             int votes = 0;
-            if (intersectionsX % 2 != 0) votes++;
-            if (intersectionsY % 2 != 0) votes++;
-            if (intersectionsZ % 2 != 0) votes++;
+
+            if (isThickWalled)
+            {
+                // 厚壁模型：必须在正负两个方向上都被墙体阻挡（交点 > 0），且穿透次数均为偶数
+                if (hitsX.Pos > 0 && hitsX.Pos % 2 == 0 && hitsX.Neg > 0 && hitsX.Neg % 2 == 0) votes++;
+                if (hitsY.Pos > 0 && hitsY.Pos % 2 == 0 && hitsY.Neg > 0 && hitsY.Neg % 2 == 0) votes++;
+                if (hitsZ.Pos > 0 && hitsZ.Pos % 2 == 0 && hitsZ.Neg > 0 && hitsZ.Neg % 2 == 0) votes++;
+            }
+            else
+            {
+                // 薄壁模型：正负方向均为奇数
+                if (hitsX.Pos % 2 != 0 && hitsX.Neg % 2 != 0) votes++;
+                if (hitsY.Pos % 2 != 0 && hitsY.Neg % 2 != 0) votes++;
+                if (hitsZ.Pos % 2 != 0 && hitsZ.Neg % 2 != 0) votes++;
+            }
 
             return votes >= 2;
         }
 
         /// <summary>
-        /// 判断射线与三角形是否相交，核心算法：Möller–Trumbore 交点算法
+        /// 双向直线穿透次数计算器
         /// </summary>
-        /// <param name="origin">射线起点</param>
-        /// <param name="direction">射线方向</param>
-        /// <param name="tri">三角形</param>
-        /// <param name="t">交点参数 t</param>
-        /// <returns>如果相交则返回 true，否则返回 false</returns>
-        private static bool RayIntersectsTriangle(Vector3 origin, Vector3 direction, Triangle tri, out double t)
+        private static BiDirHits CountLineHits(Vector3 origin, Vector3 dir, MeshAccelerator accelerator, char axis)
+        {
+            const double eps = 1e-9;
+            var px = new Vector3 { X = origin.X + eps, Y = origin.Y + eps, Z = origin.Z + eps };
+            int posCount = 0;
+            int negCount = 0;
+
+            IEnumerable<Triangle> candidates = axis == 'X' ? accelerator.GetCandidatesLineX(px.Y, px.Z) :
+                                               axis == 'Y' ? accelerator.GetCandidatesLineY(px.X, px.Z) :
+                                                             accelerator.GetCandidatesLineZ(px.X, px.Y);
+
+            foreach (var tri in candidates)
+            {
+                // 计算直线与三角形的交点参数 t
+                if (LineIntersectsTriangle(px, dir, tri, out double t))
+                {
+                    if (t > eps) posCount++;        // 在正方向相交
+                    else if (t < -eps) negCount++;  // 在负方向相交
+                }
+            }
+            return new BiDirHits { Pos = posCount, Neg = negCount };
+        }
+
+        /// <summary>
+        /// 判断无限长直线与三角形是否相交 (Möller–Trumbore 算法变体)
+        /// </summary>
+        private static bool LineIntersectsTriangle(Vector3 origin, Vector3 direction, Triangle tri, out double t)
         {
             const double EPSILON = 1e-9;
             t = 0.0;
 
-            var edge1 = new Vector3
-            {
-                X = tri.V1.X - tri.V0.X,
-                Y = tri.V1.Y - tri.V0.Y,
-                Z = tri.V1.Z - tri.V0.Z
-            };
-
-            var edge2 = new Vector3
-            {
-                X = tri.V2.X - tri.V0.X,
-                Y = tri.V2.Y - tri.V0.Y,
-                Z = tri.V2.Z - tri.V0.Z
-            };
+            var edge1 = Subtract(tri.V1, tri.V0);
+            var edge2 = Subtract(tri.V2, tri.V0);
 
             var h = Cross(direction, edge2);
             double a = Dot(edge1, h);
@@ -485,25 +507,20 @@ namespace DynaOrchestrator.Core.PreProcessing
                 return false;
 
             double f = 1.0 / a;
-
-            var s = new Vector3
-            {
-                X = origin.X - tri.V0.X,
-                Y = origin.Y - tri.V0.Y,
-                Z = origin.Z - tri.V0.Z
-            };
-
+            var s = Subtract(origin, tri.V0);
             double u = f * Dot(s, h);
+
             if (u < 0.0 || u > 1.0)
                 return false;
 
             var q = Cross(s, edge1);
             double v = f * Dot(direction, q);
+
             if (v < 0.0 || u + v > 1.0)
                 return false;
 
             t = f * Dot(edge2, q);
-            return t > EPSILON;
+            return true; // 不再限制 t > 0，允许返回负方向交点
         }
 
         /// <summary>

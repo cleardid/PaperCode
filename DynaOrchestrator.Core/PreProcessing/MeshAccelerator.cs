@@ -55,17 +55,16 @@ namespace DynaOrchestrator.Core.PreProcessing
         private long GetHash(int x, int y, int z) => ((long)x * 73856093) ^ ((long)y * 19349663) ^ ((long)z * 83492791);
 
         /// <summary>
-        /// 获取 +X 方向射线可能穿过的候选三角形
+        /// 获取平行于 X 轴的整条直线上可能穿过的所有候选三角形
         /// </summary>
-        public IEnumerable<Triangle> GetCandidatesRayX(double ox, double oy, double oz)
+        public IEnumerable<Triangle> GetCandidatesLineX(double oy, double oz)
         {
-            int startX = GetIndex(ox, _bounds.MinX);
+            int y = GetIndex(oy, _bounds.MinY);
+            int z = GetIndex(oz, _bounds.MinZ);
             int endX = GetIndex(_bounds.MaxX, _bounds.MinX);
-            int y = GetIndex(oy, _bounds.MinY);
-            int z = GetIndex(oz, _bounds.MinZ);
 
             var result = new HashSet<Triangle>();
-            for (int x = startX; x <= endX; x++)
+            for (int x = 0; x <= endX; x++)
             {
                 if (_grid.TryGetValue(GetHash(x, y, z), out var list))
                     foreach (var tri in list) result.Add(tri);
@@ -74,17 +73,16 @@ namespace DynaOrchestrator.Core.PreProcessing
         }
 
         /// <summary>
-        /// 获取 +Y 方向射线可能穿过的候选三角形
+        /// 获取平行于 Y 轴的整条直线上可能穿过的所有候选三角形
         /// </summary>
-        public IEnumerable<Triangle> GetCandidatesRayY(double ox, double oy, double oz)
+        public IEnumerable<Triangle> GetCandidatesLineY(double ox, double oz)
         {
             int x = GetIndex(ox, _bounds.MinX);
-            int startY = GetIndex(oy, _bounds.MinY);
+            int z = GetIndex(oz, _bounds.MinZ);
             int endY = GetIndex(_bounds.MaxY, _bounds.MinY);
-            int z = GetIndex(oz, _bounds.MinZ);
 
             var result = new HashSet<Triangle>();
-            for (int y = startY; y <= endY; y++)
+            for (int y = 0; y <= endY; y++)
             {
                 if (_grid.TryGetValue(GetHash(x, y, z), out var list))
                     foreach (var tri in list) result.Add(tri);
@@ -93,17 +91,16 @@ namespace DynaOrchestrator.Core.PreProcessing
         }
 
         /// <summary>
-        /// 获取 +Z 方向射线可能穿过的候选三角形
+        /// 获取平行于 Z 轴的整条直线上可能穿过的所有候选三角形
         /// </summary>
-        public IEnumerable<Triangle> GetCandidatesRayZ(double ox, double oy, double oz)
+        public IEnumerable<Triangle> GetCandidatesLineZ(double ox, double oy)
         {
             int x = GetIndex(ox, _bounds.MinX);
             int y = GetIndex(oy, _bounds.MinY);
-            int startZ = GetIndex(oz, _bounds.MinZ);
             int endZ = GetIndex(_bounds.MaxZ, _bounds.MinZ);
 
             var result = new HashSet<Triangle>();
-            for (int z = startZ; z <= endZ; z++)
+            for (int z = 0; z <= endZ; z++)
             {
                 if (_grid.TryGetValue(GetHash(x, y, z), out var list))
                     foreach (var tri in list) result.Add(tri);
