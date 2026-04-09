@@ -57,15 +57,6 @@ namespace DynaOrchestrator.Core.Batch
             // 最终后处理结果输出到 output/ 目录
             config.Pipeline.NpzOutputFile = paths.LocalNpzFile;
 
-            // 单工况资源控制：由外层批处理统一设定
-            config.Pipeline.Ncpu = ncpuPerCase;
-            config.Pipeline.Memory = memoryPerCase;
-
-            // 样本标识
-            config.Pipeline.CaseId = record.CaseId;
-            config.Pipeline.DatasetVersion = record.DatasetStage;
-            //config.Pipeline.EnableGraphPostProcessing = 
-
             // LsDynaPath 保持基础配置不变
 
             // ---------------- ExplosiveParams ----------------

@@ -228,7 +228,6 @@ namespace DynaOrchestrator.Core.Batch
                 PipelineExecutor.Execute(
                     caseConfig,
                     record,
-                    optimizeHardwareResources: false,
                     cancellationToken: cancellationToken,
                     logger: logger);
 

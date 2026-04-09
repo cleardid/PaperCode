@@ -26,15 +26,5 @@
         /// 每个 case 分配给 LS-DYNA 的内存参数。
         /// </summary>
         public string MemoryPerCase { get; set; } = "400m";
-
-        /// <summary>
-        /// 单任务默认数据阶段。
-        /// </summary>
-        public string SingleDatasetStage { get; set; } = "single";
-
-        /// <summary>
-        /// 单任务默认几何类型，对应 base_models/<GeomType>/。
-        /// </summary>
-        public string SingleGeomType { get; set; } = "G1";
     }
 }

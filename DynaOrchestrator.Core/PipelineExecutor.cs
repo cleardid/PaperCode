@@ -21,12 +21,10 @@ namespace DynaOrchestrator.Core
         /// 注意：
         /// 1. 传入的 appConfig 应保持配置文件原始单位；
         /// 2. 方法内部会统一调用 NormalizeUnits()；
-        /// 3. optimizeHardwareResources=true 时，会自动覆盖 Ncpu / Memory。
         /// </summary>
         public static void Execute(
             AppConfig appConfig,
             BatchCaseRecord record,
-            bool optimizeHardwareResources = false,
             Action<string>? logger = null,
             CancellationToken cancellationToken = default)
         {
@@ -39,18 +37,13 @@ namespace DynaOrchestrator.Core
 
             other.NormalizeUnits();
 
-            if (optimizeHardwareResources)
-            {
-                OptimizeHardwareResources(config, logger);
-            }
-
             logger?.Invoke($"[Config] 已加载配置. 爆源( mm): ({exp.Xc}, {exp.Yc}, {exp.Zc}), 当量: {exp.W} kg");
 
             // [Phase 1] 前处理 (如果连网格自适应也不需要，也可以加开关屏蔽)
             RunPreProcessing(config, other, exp, logger);
 
             // [Phase 2] LS-DYNA 求解 (核心保留)
-            string actualTrhistPath = RunSimulation(config, cancellationToken, logger);
+            string actualTrhistPath = RunSimulation(config, appConfig, cancellationToken, logger);
 
             // [Phase 3] 后处理与图构建 (按需执行)
             if (config.EnableGraphPostProcessing)
@@ -105,7 +98,7 @@ namespace DynaOrchestrator.Core
         /// 当前逻辑保持不变：
         /// 实际 trhist 路径 = OutputKFile 所在目录 + TrhistFile 文件名
         /// </summary>
-        private static string RunSimulation(PipelineConfig config, CancellationToken cancellationToken, Action<string>? logger)
+        private static string RunSimulation(PipelineConfig config, AppConfig appConfig, CancellationToken cancellationToken, Action<string>? logger)
         {
             logger?.Invoke("\n[Phase 2] 启动 LS-DYNA 求解器...");
 
@@ -115,7 +108,7 @@ namespace DynaOrchestrator.Core
 
             string actualTrhistPath = Path.Combine(runDir, config.TrhistFile);
 
-            bool ok = LsDynaOrchestrator.Run(config, cancellationToken, logger);
+            bool ok = LsDynaOrchestrator.Run(config, appConfig.Workspace.NcpuPerCase, appConfig.Workspace.MemoryPerCase, cancellationToken, logger);
 
             // 若是用户主动停止导致的终止，直接按取消抛出，不归类为普通失败
             cancellationToken.ThrowIfCancellationRequested();
@@ -435,66 +428,6 @@ namespace DynaOrchestrator.Core
             {
                 if (float.IsNaN(values[i]) || float.IsInfinity(values[i]))
                     throw new InvalidOperationException($"{name}[{i}] 存在 NaN/Inf。");
-            }
-        }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-        private class MEMORYSTATUSEX
-        {
-            public uint dwLength;
-            public uint dwMemoryLoad;
-            public ulong ullTotalPhys;
-            public ulong ullAvailPhys;
-            public ulong ullTotalPageFile;
-            public ulong ullAvailPageFile;
-            public ulong ullTotalVirtual;
-            public ulong ullAvailVirtual;
-            public ulong ullAvailExtendedVirtual;
-
-            public MEMORYSTATUSEX()
-            {
-                dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
-            }
-        }
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
-
-        /// <summary>
-        /// 动态计算并覆盖 LS-DYNA 的运行参数。
-        /// 批处理模式下通常建议关闭该逻辑，避免覆盖外层统一分配的 ncpu/memory。
-        /// </summary>
-        private static void OptimizeHardwareResources(PipelineConfig config, Action<string>? logger)
-        {
-            // CPU：保留 1 个逻辑核给系统
-            int totalCores = Environment.ProcessorCount;
-            config.Ncpu = Math.Max(1, totalCores - 1);
-
-            // 内存：按当前剩余物理内存的 85% 分配给 LS-DYNA
-            MEMORYSTATUSEX memStatus = new MEMORYSTATUSEX();
-            if (GlobalMemoryStatusEx(memStatus))
-            {
-                ulong availableMemoryBytes = memStatus.ullAvailPhys;
-                double targetMemoryBytes = availableMemoryBytes * 0.85;
-
-                // 转换为 LS-DYNA 所需 Mega-Words（1 Word = 8 Bytes）
-                long memoryInMegaWords = (long)(targetMemoryBytes / 8.0 / 1000000.0);
-
-                // 至少给 20m
-                memoryInMegaWords = Math.Max(20, memoryInMegaWords);
-                config.Memory = $"{memoryInMegaWords}m";
-
-                double availableGb = availableMemoryBytes / 1024.0 / 1024.0 / 1024.0;
-                double targetGb = targetMemoryBytes / 1024.0 / 1024.0 / 1024.0;
-
-                logger?.Invoke($"[硬件探测] CPU 逻辑核心: {totalCores}，分配给 DYNA: {config.Ncpu} 核");
-                logger?.Invoke($"[硬件探测] 系统当前剩余可用内存: {availableGb:F2} GB");
-                logger?.Invoke($"[硬件探测] 提取 85% 分配给 DYNA: {config.Memory} (约 {targetGb:F2} GB)");
-            }
-            else
-            {
-                logger?.Invoke("[Warning] 无法读取系统内存状态，将使用配置文件默认值。");
             }
         }
 

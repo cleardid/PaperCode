@@ -14,6 +14,8 @@ namespace DynaOrchestrator.Core.Solver
 
         public static bool Run(
             PipelineConfig config,
+            int ncpu,
+            string memory,
             CancellationToken cancellationToken = default,
             Action<string>? logger = null)
         {
@@ -33,7 +35,7 @@ namespace DynaOrchestrator.Core.Solver
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = config.LsDynaPath,
-                    Arguments = $"i={Path.GetFileName(fullKFilePath)} memory={config.Memory} ncpu={config.Ncpu}",
+                    Arguments = $"i={Path.GetFileName(fullKFilePath)} memory={memory} ncpu={ncpu}",
                     WorkingDirectory = workDir,
                     UseShellExecute = false,
                     CreateNoWindow = true,
