@@ -1,6 +1,4 @@
 ﻿using System;
-using System.IO;
-
 namespace DynaOrchestrator.Core.Batch
 {
     /// <summary>
@@ -8,7 +6,7 @@ namespace DynaOrchestrator.Core.Batch
     /// 目录规划：
     /// 1. input/  : 基础输入文件与自动生成的 config.json
     /// 2. run/    : LS-DYNA 实际运行目录，存放 model_out.k、trhist 及其他原始求解输出
-    /// 3. output/ : 后处理最终结果目录，存放 npz、quality_report、case_metadata 等
+    /// 3. output/ : 后处理最终结果目录，存放 npz、case_metadata 等
     /// </summary>
     public sealed class BatchCasePaths
     {
@@ -18,7 +16,7 @@ namespace DynaOrchestrator.Core.Batch
         public string BatchRoot { get; }
 
         /// <summary>
-        /// 数据阶段，例如 pilot_54
+        /// 数据阶段，例如 train
         /// </summary>
         public string DatasetStage { get; }
 
