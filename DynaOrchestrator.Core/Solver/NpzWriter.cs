@@ -1,4 +1,5 @@
 ﻿using System.IO.Compression;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace DynaOrchestrator.Core.Solver
@@ -6,26 +7,26 @@ namespace DynaOrchestrator.Core.Solver
     public static class NpzWriter
     {
         public static void Save(
-            string path,
-            int[] rows,
-            int[] cols,
-            float[] weights,
-            float[] features,
-            float[] attrs,
-            float[] pMax,
-            float[] tArrival,
-            float[] positiveImpulse,
-            float[] positiveDuration,
-            float[] nearWallFlag,
-            float[] nearEdgeFlag,
-            float[] nearCornerFlag,
-            int[] samplingRegionId,
-            float[] caseCond,
-            int num_nodes,
-            int time_steps,
-            int feature_dim,
-            int attr_dim,
-            Action<string>? logger)
+                    string path,
+                    ReadOnlySpan<int> rows,
+                    ReadOnlySpan<int> cols,
+                    ReadOnlySpan<float> weights,
+                    ReadOnlySpan<float> features,
+                    ReadOnlySpan<float> attrs,
+                    ReadOnlySpan<float> pMax,
+                    ReadOnlySpan<float> tArrival,
+                    ReadOnlySpan<float> positiveImpulse,
+                    ReadOnlySpan<float> positiveDuration,
+                    ReadOnlySpan<float> nearWallFlag,
+                    ReadOnlySpan<float> nearEdgeFlag,
+                    ReadOnlySpan<float> nearCornerFlag,
+                    ReadOnlySpan<int> samplingRegionId,
+                    ReadOnlySpan<float> caseCond,
+                    int num_nodes,
+                    int time_steps,
+                    int feature_dim,
+                    int attr_dim,
+                    Action<string>? logger)
         {
             string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
             if (!string.IsNullOrWhiteSpace(dir))
@@ -67,28 +68,31 @@ namespace DynaOrchestrator.Core.Solver
             logger?.Invoke($"[后处理] 数据集已序列化保存至: {path}");
         }
 
-        private static void WriteNpy<T>(ZipArchive archive, string entryName, T[] data, int[] shape, string dtype) where T : unmanaged
+        private static void WriteNpy<T>(ZipArchive archive, string entryName, ReadOnlySpan<T> data, int[] shape, string dtype) where T : unmanaged
         {
             var entry = archive.CreateEntry(entryName, CompressionLevel.NoCompression);
-            using (var stream = entry.Open())
-            using (var writer = new BinaryWriter(stream))
-            {
-                // NPY Magic Header
-                writer.Write(new byte[] { 0x93, 0x4E, 0x55, 0x4D, 0x50, 0x59, 0x01, 0x00 });
+            using var stream = entry.Open();
+            // 使用 leaveOpen: true 确保 Writer 不会关闭底层流，避免压缩流截断
+            using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
 
-                string shapeStr = shape.Length == 1 ? $"({shape[0]},)" : $"({string.Join(", ", shape)})";
-                string dictStr = $"{{'descr': '{dtype}', 'fortran_order': False, 'shape': {shapeStr}, }}";
+            // NPY Magic Header
+            writer.Write(new byte[] { 0x93, 0x4E, 0x55, 0x4D, 0x50, 0x59, 0x01, 0x00 });
 
-                int padding = 64 - ((10 + dictStr.Length) % 64);
-                dictStr += new string(' ', padding) + "\n";
+            string shapeStr = shape.Length == 1 ? $"({shape[0]},)" : $"({string.Join(", ", shape)})";
+            string dictStr = $"{{'descr': '{dtype}', 'fortran_order': False, 'shape': {shapeStr}, }}";
 
-                writer.Write((ushort)dictStr.Length);
-                writer.Write(Encoding.ASCII.GetBytes(dictStr));
+            int padding = 64 - ((10 + dictStr.Length) % 64);
+            dictStr += new string(' ', padding) + "\n";
 
-                byte[] byteData = new byte[data.Length * System.Runtime.InteropServices.Marshal.SizeOf<T>()];
-                Buffer.BlockCopy(data, 0, byteData, 0, byteData.Length);
-                writer.Write(byteData);
-            }
+            writer.Write((ushort)dictStr.Length);
+            writer.Write(Encoding.ASCII.GetBytes(dictStr));
+
+            // 必须在写入裸字节前刷新缓冲
+            writer.Flush();
+
+            // 零拷贝核心：将泛型内存块直接映射为 Byte Span 并写入底层压缩流
+            ReadOnlySpan<byte> byteData = MemoryMarshal.AsBytes(data);
+            stream.Write(byteData);
         }
     }
 }

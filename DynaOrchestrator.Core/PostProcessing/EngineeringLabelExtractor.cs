@@ -17,7 +17,7 @@ namespace DynaOrchestrator.Core.PostProcessing
     {
         public static EngineeringLabels Extract(
             string trhistPath,
-            float[] features,
+            ReadOnlySpan<float> features,
             int numNodes,
             int timeSteps,
             int featureDim,
@@ -25,9 +25,6 @@ namespace DynaOrchestrator.Core.PostProcessing
             int pressureDimIndex = 4,
             float arrivalThreshold = 1e-7f)
         {
-            if (features == null)
-                throw new ArgumentNullException(nameof(features));
-
             if (features.Length != numNodes * timeSteps * featureDim)
                 throw new InvalidOperationException("features 长度与 (N,T,D) 不匹配。");
 

@@ -3,7 +3,8 @@ using DynaOrchestrator.Core.Models;
 using DynaOrchestrator.Core.PostProcessing;
 using DynaOrchestrator.Core.PreProcessing;
 using DynaOrchestrator.Core.Solver;
-using System.Linq;
+using System;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
@@ -12,40 +13,42 @@ namespace DynaOrchestrator.Core
 {
     /// <summary>
     /// 单工况执行器。
-    /// 将原先 Program.cs 中的单 case 流程抽取出来，供批处理与单工况模式复用。
+    /// 负责串联前处理（自适应网格生成）、LS-DYNA求解，以及基于非托管内存的高性能图特征提取与序列化。
+    /// 在批处理模式下，该类被 BatchRunner 并发调用。
     /// </summary>
     internal static class PipelineExecutor
     {
         /// <summary>
         /// 执行单个工况的完整流程。
-        /// 注意：
-        /// 1. 传入的 appConfig 应保持配置文件原始单位；
-        /// 2. 方法内部会统一调用 NormalizeUnits()；
         /// </summary>
+        /// <param name="appConfig">包含该工况所有配置信息的对象（注意其单位为原始输入单位）</param>
+        /// <param name="record">当前执行的工况记录元数据</param>
+        /// <param name="logger">UI 线程的日志回调委托</param>
+        /// <param name="cancellationToken">任务取消令牌，用于随时安全中断底层求解器</param>
         public static void Execute(
             AppConfig appConfig,
             BatchCaseRecord record,
             Action<string>? logger = null,
             CancellationToken cancellationToken = default)
         {
-            if (appConfig == null)
-                throw new ArgumentNullException(nameof(appConfig));
+            if (appConfig == null) throw new ArgumentNullException(nameof(appConfig));
 
             var config = appConfig.Pipeline;
             var exp = appConfig.Explosive;
             var other = appConfig.Other;
 
+            // 统一在主流程起点将配置文件中的 mm 转换为 m，防止后续计算出现量纲错误
             other.NormalizeUnits();
 
-            logger?.Invoke($"[Config] 已加载配置. 爆源( mm): ({exp.Xc}, {exp.Yc}, {exp.Zc}), 当量: {exp.W} kg");
+            logger?.Invoke($"[Config] 已加载配置. 爆源(mm): ({exp.Xc}, {exp.Yc}, {exp.Zc}), 当量: {exp.W} kg");
 
-            // [Phase 1] 前处理 (如果连网格自适应也不需要，也可以加开关屏蔽)
+            // [阶段 1] 前处理：基于 STL 与包围盒生成追踪点网格
             RunPreProcessing(config, other, exp, logger);
 
-            // [Phase 2] LS-DYNA 求解 (核心保留)
+            // [阶段 2] LS-DYNA 求解：拉起外部求解器进程，并阻塞等待正常终止
             string actualTrhistPath = RunSimulation(config, appConfig, cancellationToken, logger);
 
-            // [Phase 3] 后处理与图构建 (按需执行)
+            // [阶段 3] 后处理与图构建：调用 C++ 图引擎，并通过 Span<T> 实现内存零拷贝提取
             if (config.EnableGraphPostProcessing)
             {
                 RunPostProcessing(config, exp, other, record, actualTrhistPath, logger);
@@ -57,322 +60,181 @@ namespace DynaOrchestrator.Core
         }
 
         /// <summary>
-        /// 从配置文件加载并解析 AppConfig 对象。
+        /// 从磁盘加载 JSON 格式的工况独立配置文件。
         /// </summary>
         public static AppConfig LoadConfig(string configFile)
         {
-            if (!File.Exists(configFile))
-                throw new FileNotFoundException($"未找到配置文件: {configFile}");
-
+            if (!File.Exists(configFile)) throw new FileNotFoundException($"未找到配置文件: {configFile}");
             string jsonString = File.ReadAllText(configFile);
-            if (string.IsNullOrWhiteSpace(jsonString))
-                throw new Exception("配置文件为空");
-
-            AppConfig? appConfig = JsonSerializer.Deserialize<AppConfig>(jsonString);
-            if (appConfig == null)
-                throw new Exception("配置文件解析失败");
-
-            return appConfig;
+            return JsonSerializer.Deserialize<AppConfig>(jsonString) ?? throw new Exception("配置文件解析失败");
         }
 
         /// <summary>
-        /// 进行几何解析与自适应网格生成，输出新的 K 文件。
+        /// 执行前处理流程：解析 STL 并生成自适应 Tracer 网格。
         /// </summary>
         private static void RunPreProcessing(PipelineConfig config, OtherConfig other, ExplosiveParams exp, Action<string>? logger)
         {
             logger?.Invoke("\n[Phase 1] 几何解析与自适应网格生成...");
+            string outDir = Path.GetDirectoryName(Path.GetFullPath(config.OutputKFile)) ?? throw new Exception("无法获取输出目录");
 
-            string? outDir = Path.GetDirectoryName(Path.GetFullPath(config.OutputKFile));
-            if (outDir == null)
-                throw new Exception("无法获取输出文件目录");
+            if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
 
-            if (!Directory.Exists(outDir))
-                Directory.CreateDirectory(outDir);
-
+            // 解析二进制 STL，并提取体素化包围盒
             var stlMesh = STLParser.ParseBinarySTL(config.StlFile, logger);
+
+            // 生成新测点并覆盖写入 model_out.k
             AdaptiveMeshGenerator.ProcessAndGenerate(config.BaseKFile, config.OutputKFile, stlMesh, other, exp, logger);
         }
 
         /// <summary>
-        /// 执行 LS-DYNA 求解，输出 TRHIST 文件。
-        /// 当前逻辑保持不变：
-        /// 实际 trhist 路径 = OutputKFile 所在目录 + TrhistFile 文件名
+        /// 执行 LS-DYNA 求解，监控输出并处理中止信号。
         /// </summary>
         private static string RunSimulation(PipelineConfig config, AppConfig appConfig, CancellationToken cancellationToken, Action<string>? logger)
         {
             logger?.Invoke("\n[Phase 2] 启动 LS-DYNA 求解器...");
-
-            string? runDir = Path.GetDirectoryName(Path.GetFullPath(config.OutputKFile));
-            if (runDir == null)
-                throw new Exception("无法获取 trhist 目录");
-
+            string runDir = Path.GetDirectoryName(Path.GetFullPath(config.OutputKFile)) ?? throw new Exception("无法获取 trhist 目录");
             string actualTrhistPath = Path.Combine(runDir, config.TrhistFile);
 
+            // 核心调度：使用批处理配置统一下发的硬件资源（NcpuPerCase / MemoryPerCase）
             bool ok = LsDynaOrchestrator.Run(config, appConfig.Workspace.NcpuPerCase, appConfig.Workspace.MemoryPerCase, cancellationToken, logger);
 
-            // 若是用户主动停止导致的终止，直接按取消抛出，不归类为普通失败
+            // 响应用户界面的取消请求
             cancellationToken.ThrowIfCancellationRequested();
 
             if (!ok || !File.Exists(actualTrhistPath))
-                throw new Exception($"仿真执行中断或未找到文件: {actualTrhistPath}");
+                throw new Exception($"仿真执行中断或未生成结果文件: {actualTrhistPath}");
 
             return actualTrhistPath;
         }
 
         /// <summary>
-        /// 执行后处理图引擎，提取物理图特征与静态属性，并保存为 NPZ 文件。
-        /// 注意：当前 DLL 原生返回 11 维静态属性：
-        /// [x,y,z,d,nx,ny,nz,W^(1/3), d_wall, d_edge, d_corner]
+        /// 执行图引擎后处理，提取物理特征并序列化为 NPZ 数据集。
+        /// 此方法深入使用了非托管内存的零拷贝技术，大幅降低了大数据量下的内存峰值（OOM 风险）。
         /// </summary>
         private static void RunPostProcessing(PipelineConfig config, ExplosiveParams exp, OtherConfig other, BatchCaseRecord record, string actualTrhistPath, Action<string>? logger)
         {
             logger?.Invoke("\n[Phase 3] 提取物理图特征与静态属性...");
 
-            // 向 C++ 注入托管回调
+            // 注册 C# 回调到 C++，用于将 C++ 引擎的计算进度输出到 WPF 界面
             GraphEngineAPI.InitializeLogger(logger);
 
-            string absoluteStlPath = Path.GetFullPath(config.StlFile);
-
+            // 调用 C++ 动态链接库进行空间搜索与图构建
             IntPtr ptr = GraphEngineAPI.GenerateGraph(
-                actualTrhistPath,
-                absoluteStlPath,
-                other.Rc,
-                other.Alpha,
-                (float)exp.Xc,
-                (float)exp.Yc,
-                (float)exp.Zc,
-                (float)exp.W);
+                actualTrhistPath, Path.GetFullPath(config.StlFile),
+                other.Rc, other.Alpha, (float)exp.Xc, (float)exp.Yc, (float)exp.Zc, (float)exp.W);
 
-            if (ptr == IntPtr.Zero)
-                throw new Exception("C++ 图引擎返回空指针");
+            if (ptr == IntPtr.Zero) throw new Exception("C++ 图引擎返回空指针，构建失败。");
 
             try
             {
+                // 将返回的 IntPtr 映射为 C# 结构体（仅映射元数据与指针，不拷贝数组实体）
                 GraphData data = Marshal.PtrToStructure<GraphData>(ptr);
+                ValidateGraphData(data); // 内存安全前置校验
 
-                var (rows, cols, weights, features, attrs11) = ExtractManagedGraphData(data);
+                // 【核心性能优化区】：启用 unsafe 指针包装
+                // 原逻辑使用 Marshal.Copy 会在 C# 托管堆分配等大的 float[]，导致内存翻倍。
+                // 现逻辑使用 ReadOnlySpan<T> 直接在 C++ 分配的非托管内存上进行视图包装，实现真正零拷贝。
+                unsafe
+                {
+                    // 构建图拓扑 Span
+                    var rowsSpan = new ReadOnlySpan<int>(data.coo_rows.ToPointer(), data.num_edges);
+                    var colsSpan = new ReadOnlySpan<int>(data.coo_cols.ToPointer(), data.num_edges);
+                    var weightsSpan = new ReadOnlySpan<float>(data.coo_weights.ToPointer(), data.num_edges);
 
-                if (data.feature_dim != 5)
-                    throw new Exception($"DLL 返回的 x 特征维度不是 5，而是 {data.feature_dim}");
+                    // 构建节点特征与静态属性 Span
+                    var featuresSpan = new ReadOnlySpan<float>(data.node_features.ToPointer(), data.num_nodes * data.time_steps * data.feature_dim);
+                    var attrsSpan = new ReadOnlySpan<float>(data.node_attrs.ToPointer(), data.num_nodes * data.attr_dim);
 
-                if (data.attr_dim != 11)
-                    throw new Exception($"DLL 返回的 node_attr 维度不是 11，而是 {data.attr_dim}");
+                    if (data.feature_dim != 5) throw new Exception($"DLL 返回的 x 维度异常，预期 5，实际为 {data.feature_dim}");
+                    if (data.attr_dim != 11) throw new Exception($"DLL 返回的 node_attr 维度异常，预期 11，实际为 {data.attr_dim}");
 
-                int attrDim = data.attr_dim;
+                    // 基于非托管内存计算工程响应标签（到达时间、比冲、超压等）
+                    var labels = EngineeringLabelExtractor.Extract(
+                        actualTrhistPath, featuresSpan, data.num_nodes, data.time_steps, data.feature_dim, logger, 4, 1e-7f);
 
-                const float arrivalThresholdPa = 1e-7f;
+                    // 提取边界语义先验信息
+                    float[] nearWallFlag = BuildBinarySemanticFlag(attrsSpan, data.num_nodes, data.attr_dim, 8, (float)other.WallMargin);
+                    float[] nearEdgeFlag = BuildBinarySemanticFlag(attrsSpan, data.num_nodes, data.attr_dim, 9, (float)other.WallMargin);
+                    float[] nearCornerFlag = BuildBinarySemanticFlag(attrsSpan, data.num_nodes, data.attr_dim, 10, (float)other.WallMargin);
+                    int[] samplingRegionId = BuildSamplingRegionId(nearWallFlag, nearEdgeFlag, nearCornerFlag, data.num_nodes);
 
-                // 提取工程响应标签。当前采用方案 B：保留 4 个 engineering head 标签，便于后续扩展。
-                var labels = EngineeringLabelExtractor.Extract(
-                    actualTrhistPath,
-                    features,
-                    data.num_nodes,
-                    data.time_steps,
-                    data.feature_dim,
-                    logger,
-                    pressureDimIndex: 4,
-                    arrivalThreshold: arrivalThresholdPa);
+                    // 生成该工况的宏观条件向量
+                    float[] caseCond = BuildCaseConditionVector(record);
 
-                // 近壁 / 近棱 / 近角语义标签
-                float[] nearWallFlag = BuildBinarySemanticFlag(
-                    attrs11, data.num_nodes, attrDim, attrIndex: 8, threshold: (float)other.WallMargin);
+                    // 序列化前执行 STGNS-v1 算法模型要求的对齐与合法性校验
+                    ValidateStgnsV1Export(rowsSpan, colsSpan, weightsSpan, featuresSpan, attrsSpan, labels.PeakOverpressure, labels.ArrivalTime, labels.PositiveImpulse, labels.PositiveDuration, nearWallFlag, nearEdgeFlag, nearCornerFlag, samplingRegionId, caseCond, data.num_nodes, data.time_steps, data.feature_dim, data.attr_dim);
 
-                float[] nearEdgeFlag = BuildBinarySemanticFlag(
-                    attrs11, data.num_nodes, attrDim, attrIndex: 9, threshold: (float)other.WallMargin);
-
-                float[] nearCornerFlag = BuildBinarySemanticFlag(
-                    attrs11, data.num_nodes, attrDim, attrIndex: 10, threshold: (float)other.WallMargin);
-
-                int[] samplingRegionId = BuildSamplingRegionId(
-                    nearWallFlag,
-                    nearEdgeFlag,
-                    nearCornerFlag,
-                    data.num_nodes);
-
-                // 直接导出 case 级条件向量
-                float[] caseCond = BuildCaseConditionVector(record);
-
-                // 严格执行 STGNS-v1 当前训练链路所需的一致性校验
-                ValidateStgnsV1Export(
-                    rows,
-                    cols,
-                    weights,
-                    features,
-                    attrs11,
-                    labels.PeakOverpressure,
-                    labels.ArrivalTime,
-                    labels.PositiveImpulse,
-                    labels.PositiveDuration,
-                    nearWallFlag,
-                    nearEdgeFlag,
-                    nearCornerFlag,
-                    samplingRegionId,
-                    caseCond,
-                    data.num_nodes,
-                    data.time_steps,
-                    data.feature_dim,
-                    attrDim);
-
-                // 保存 NPZ：只保留 STGNS-v1 主训练链路真正需要的数组文件
-                NpzWriter.Save(
-                    config.NpzOutputFile,
-                    rows,
-                    cols,
-                    weights,
-                    features,
-                    attrs11,
-                    labels.PeakOverpressure,
-                    labels.ArrivalTime,
-                    labels.PositiveImpulse,
-                    labels.PositiveDuration,
-                    nearWallFlag,
-                    nearEdgeFlag,
-                    nearCornerFlag,
-                    samplingRegionId,
-                    caseCond,
-                    data.num_nodes,
-                    data.time_steps,
-                    data.feature_dim,
-                    attrDim,
-                    logger);
+                    // 将 Span 数据通过 MemoryMarshal 映射为 byte 后直接写入磁盘压缩流
+                    NpzWriter.Save(config.NpzOutputFile, rowsSpan, colsSpan, weightsSpan, featuresSpan, attrsSpan, labels.PeakOverpressure, labels.ArrivalTime, labels.PositiveImpulse, labels.PositiveDuration, nearWallFlag, nearEdgeFlag, nearCornerFlag, samplingRegionId, caseCond, data.num_nodes, data.time_steps, data.feature_dim, data.attr_dim, logger);
+                }
             }
             finally
             {
+                // 无论 C# 侧发生何种异常，必须保证 C++ 堆内存被安全释放
                 GraphEngineAPI.FreeGraphData(ptr);
                 logger?.Invoke("[Info] 非托管图内存已安全释放。");
             }
         }
 
         /// <summary>
-        /// 验证并提取托管侧图数据。
-        /// </summary>
-        private static (int[] rows, int[] cols, float[] weights, float[] features, float[] attrs)
-            ExtractManagedGraphData(GraphData data)
-        {
-            ValidateGraphData(data);
-
-            int edgeCount = data.num_edges;
-            int featureCount = checked(data.num_nodes * data.time_steps * data.feature_dim);
-            int attrCount = checked(data.num_nodes * data.attr_dim);
-
-            int[] rows = new int[edgeCount];
-            int[] cols = new int[edgeCount];
-            float[] weights = new float[edgeCount];
-            float[] features = new float[featureCount];
-            float[] attrs = new float[attrCount];
-
-            if (edgeCount > 0)
-            {
-                Marshal.Copy(data.coo_rows, rows, 0, edgeCount);
-                Marshal.Copy(data.coo_cols, cols, 0, edgeCount);
-                Marshal.Copy(data.coo_weights, weights, 0, edgeCount);
-            }
-
-            Marshal.Copy(data.node_features, features, 0, featureCount);
-            Marshal.Copy(data.node_attrs, attrs, 0, attrCount);
-
-            return (rows, cols, weights, features, attrs);
-        }
-
-        /// <summary>
-        /// 验证 GraphData 结构体内容是否合法。
+        /// 校验从 C++ 获取的 GraphData 结构指针的合法性，防止后续引发内存访问越界(Access Violation)。
         /// </summary>
         private static void ValidateGraphData(GraphData data)
         {
-            if (data.num_nodes <= 0)
-                throw new Exception("GraphData.num_nodes 非法");
-
-            if (data.num_edges < 0 || data.time_steps <= 0 || data.feature_dim <= 0 || data.attr_dim <= 0)
-                throw new Exception("GraphData 维度字段非法");
-
-            if (data.attr_dim != 11)
-                throw new Exception($"GraphData.attr_dim 非法，当前为 {data.attr_dim}，预期为 11");
-
-            if (data.num_edges > 0)
-            {
-                if (data.coo_rows == IntPtr.Zero) throw new Exception("coo_rows 空指针");
-                if (data.coo_cols == IntPtr.Zero) throw new Exception("coo_cols 空指针");
-                if (data.coo_weights == IntPtr.Zero) throw new Exception("coo_weights 空指针");
-            }
-
-            if (data.node_features == IntPtr.Zero)
-                throw new Exception("node_features 空指针");
-
-            if (data.node_attrs == IntPtr.Zero)
-                throw new Exception("node_attrs 空指针");
+            if (data.num_nodes <= 0) throw new Exception("GraphData.num_nodes 非法");
+            if (data.num_edges < 0 || data.time_steps <= 0 || data.feature_dim <= 0 || data.attr_dim != 11) throw new Exception("GraphData 维度字段非法");
+            if (data.num_edges > 0 && (data.coo_rows == IntPtr.Zero || data.coo_cols == IntPtr.Zero || data.coo_weights == IntPtr.Zero)) throw new Exception("图拓扑指针非法，返回为空");
+            if (data.node_features == IntPtr.Zero || data.node_attrs == IntPtr.Zero) throw new Exception("节点特征或属性指针非法，返回为空");
         }
 
         /// <summary>
-        /// 构建 STGNS-v1 当前训练链路使用的 case 条件向量。
-        /// 顺序固定为：
-        /// [charge_x_m, charge_y_m, charge_z_m, room_L_m, room_W_m, room_H_m, charge_scale]
-        ///
-        /// 这里的 charge_scale 明确定义为 W^(1/3)，单位 kg^(1/3)，与 node_attr 中的 W_cbrt 保持一致。
-        /// record.X / Y / Z 采用绝对坐标，单位 mm；导出到 case_cond 时统一转换为 m。
+        /// 构建 STGNS-v1 模型要求输入的 7 维全局条件特征向量
         /// </summary>
-        private static float[] BuildCaseConditionVector(BatchCaseRecord record)
+        private static float[] BuildCaseConditionVector(BatchCaseRecord record) => new[]
         {
-            return new[]
-            {
-                (float)(record.X * 0.001),
-                (float)(record.Y * 0.001),
-                (float)(record.Z * 0.001),
-                (float)record.L,
-                (float)record.W,
-                (float)record.H,
-                (float)Math.Pow(record.ChargeMass, 1.0 / 3.0)};
+            (float)(record.X * 0.001), (float)(record.Y * 0.001), (float)(record.Z * 0.001), // 相对位置 m
+            (float)record.L, (float)record.W, (float)record.H, // 房间长宽高 m
+            (float)Math.Pow(record.ChargeMass, 1.0 / 3.0) // 当量特征 W^(1/3)
+        };
+
+        /// <summary>
+        /// 基于静态属性数组，抽取二值化的空间语义标志（如是否贴壁）。
+        /// 支持对 C++ 非托管内存 (ReadOnlySpan) 直接进行安全寻址。
+        /// </summary>
+        private static float[] BuildBinarySemanticFlag(ReadOnlySpan<float> attrs, int numNodes, int attrDim, int attrIndex, float threshold)
+        {
+            var flags = new float[numNodes];
+            for (int i = 0; i < numNodes; i++) flags[i] = attrs[i * attrDim + attrIndex] <= threshold ? 1.0f : 0.0f;
+            return flags;
         }
 
         /// <summary>
-        /// 对导出的最小化 NPZ 结构执行严格校验，确保与 STGNS-v1 Python 主训练链路一致。
+        /// 为各节点分配语义归属 ID，优先级：角区 > 棱边区 > 近壁区 > 内部流场。
+        /// </summary>
+        private static int[] BuildSamplingRegionId(float[] nearWallFlag, float[] nearEdgeFlag, float[] nearCornerFlag, int numNodes)
+        {
+            var regionId = new int[numNodes];
+            for (int i = 0; i < numNodes; i++)
+            {
+                if (nearCornerFlag[i] > 0.5f) regionId[i] = 3;
+                else if (nearEdgeFlag[i] > 0.5f) regionId[i] = 2;
+                else if (nearWallFlag[i] > 0.5f) regionId[i] = 1;
+                else regionId[i] = 0;
+            }
+            return regionId;
+        }
+
+        /// <summary>
+        /// 输出前进行最终的一致性检查，防止产生带有脏数据的模型训练集。
         /// </summary>
         private static void ValidateStgnsV1Export(
-            int[] rows,
-            int[] cols,
-            float[] weights,
-            float[] features,
-            float[] attrs,
-            float[] pMax,
-            float[] tArrival,
-            float[] positiveImpulse,
-            float[] positiveDuration,
-            float[] nearWallFlag,
-            float[] nearEdgeFlag,
-            float[] nearCornerFlag,
-            int[] samplingRegionId,
-            float[] caseCond,
-            int numNodes,
-            int timeSteps,
-            int featureDim,
-            int attrDim)
+            ReadOnlySpan<int> rows, ReadOnlySpan<int> cols, ReadOnlySpan<float> weights,
+            ReadOnlySpan<float> features, ReadOnlySpan<float> attrs, ReadOnlySpan<float> pMax,
+            ReadOnlySpan<float> tArrival, ReadOnlySpan<float> positiveImpulse, ReadOnlySpan<float> positiveDuration,
+            ReadOnlySpan<float> nearWallFlag, ReadOnlySpan<float> nearEdgeFlag, ReadOnlySpan<float> nearCornerFlag,
+            ReadOnlySpan<int> samplingRegionId, ReadOnlySpan<float> caseCond,
+            int numNodes, int timeSteps, int featureDim, int attrDim)
         {
-            if (rows.Length != cols.Length || rows.Length != weights.Length)
-                throw new InvalidOperationException("边数组长度不一致：edge_index_row / edge_index_col / edge_weight 必须同长。");
-
-            if (features.Length != numNodes * timeSteps * featureDim)
-                throw new InvalidOperationException("x.npy 数据长度与 (N,T,D) 不匹配。");
-
-            if (attrs.Length != numNodes * attrDim)
-                throw new InvalidOperationException("node_attr.npy 数据长度与 (N,attr_dim) 不匹配。");
-
-            if (featureDim != 5)
-                throw new InvalidOperationException($"x.npy 的最后一维必须恒为 5，当前为 {featureDim}。");
-
-            if (attrDim != 11)
-                throw new InvalidOperationException($"node_attr.npy 的最后一维必须恒为 11，当前为 {attrDim}。");
-
-            ValidateNodeArrayLength(nearWallFlag, numNodes, nameof(nearWallFlag));
-            ValidateNodeArrayLength(nearEdgeFlag, numNodes, nameof(nearEdgeFlag));
-            ValidateNodeArrayLength(nearCornerFlag, numNodes, nameof(nearCornerFlag));
-            ValidateNodeArrayLength(samplingRegionId, numNodes, nameof(samplingRegionId));
-            ValidateNodeArrayLength(pMax, numNodes, nameof(pMax));
-            ValidateNodeArrayLength(tArrival, numNodes, nameof(tArrival));
-            ValidateNodeArrayLength(positiveImpulse, numNodes, nameof(positiveImpulse));
-            ValidateNodeArrayLength(positiveDuration, numNodes, nameof(positiveDuration));
-
-            if (caseCond.Length != 7)
-                throw new InvalidOperationException("case_cond.npy 的长度必须恒为 7。");
-
             EnsureEdgeIndicesInRange(rows, cols, numNodes);
 
             EnsureFinite(weights, nameof(weights));
@@ -386,108 +248,29 @@ namespace DynaOrchestrator.Core
             EnsureFinite(nearEdgeFlag, nameof(nearEdgeFlag));
             EnsureFinite(nearCornerFlag, nameof(nearCornerFlag));
             EnsureFinite(caseCond, nameof(caseCond));
-
-            for (int i = 0; i < numNodes; i++)
-            {
-                bool isCorner = nearCornerFlag[i] > 0.5f;
-                bool isEdge = nearEdgeFlag[i] > 0.5f;
-                bool isWall = nearWallFlag[i] > 0.5f;
-
-                int expectedRegionId = isCorner ? 3 : isEdge ? 2 : isWall ? 1 : 0;
-                int actualRegionId = samplingRegionId[i];
-
-                if (actualRegionId < 0 || actualRegionId > 3)
-                    throw new InvalidOperationException($"sampling_region_id[{i}] 超出合法范围 [0,3]，当前值={actualRegionId}。");
-
-                if (actualRegionId != expectedRegionId)
-                    throw new InvalidOperationException($"sampling_region_id 与 near_*_flag 语义不一致，节点 {i} 期望 {expectedRegionId}，实际 {actualRegionId}。");
-            }
         }
 
-        private static void ValidateNodeArrayLength<T>(T[] values, int numNodes, string name)
-        {
-            if (values.Length != numNodes)
-                throw new InvalidOperationException($"{name} 长度必须等于 num_nodes，当前 {values.Length} != {numNodes}。");
-        }
-
-        private static void EnsureEdgeIndicesInRange(int[] rows, int[] cols, int numNodes)
+        /// <summary>
+        /// 校验 COO 图拓扑索引是否严格映射在当前节点规模内，防止训练框架崩溃。
+        /// </summary>
+        private static void EnsureEdgeIndicesInRange(ReadOnlySpan<int> rows, ReadOnlySpan<int> cols, int numNodes)
         {
             for (int i = 0; i < rows.Length; i++)
             {
-                if (rows[i] < 0 || rows[i] >= numNodes)
-                    throw new InvalidOperationException($"edge_index_row[{i}] 越界，当前值={rows[i]}，num_nodes={numNodes}。");
-
-                if (cols[i] < 0 || cols[i] >= numNodes)
-                    throw new InvalidOperationException($"edge_index_col[{i}] 越界，当前值={cols[i]}，num_nodes={numNodes}。");
+                if (rows[i] < 0 || rows[i] >= numNodes) throw new InvalidOperationException($"edge_index_row[{i}] 越界，预期范围 [0, {numNodes})，实际值为 {rows[i]}");
+                if (cols[i] < 0 || cols[i] >= numNodes) throw new InvalidOperationException($"edge_index_col[{i}] 越界，预期范围 [0, {numNodes})，实际值为 {cols[i]}");
             }
         }
 
-        private static void EnsureFinite(float[] values, string name)
+        /// <summary>
+        /// 扫描并剔除包含 NaN 或是无限大值的脏特征列。
+        /// </summary>
+        private static void EnsureFinite(ReadOnlySpan<float> values, string name)
         {
             for (int i = 0; i < values.Length; i++)
             {
-                if (float.IsNaN(values[i]) || float.IsInfinity(values[i]))
-                    throw new InvalidOperationException($"{name}[{i}] 存在 NaN/Inf。");
+                if (float.IsNaN(values[i]) || float.IsInfinity(values[i])) throw new InvalidOperationException($"{name}[{i}] 存在 NaN或Inf等无效数值");
             }
-        }
-
-        private static float[] BuildBinarySemanticFlag(
-            float[] attrs,
-            int numNodes,
-            int attrDim,
-            int attrIndex,
-            float threshold)
-        {
-            if (attrs == null)
-                throw new ArgumentNullException(nameof(attrs));
-
-            if (attrDim <= attrIndex)
-                throw new ArgumentOutOfRangeException(nameof(attrIndex), $"attrIndex={attrIndex} 超出 attrDim={attrDim}");
-
-            if (attrs.Length != numNodes * attrDim)
-                throw new InvalidOperationException("attrs 长度与 numNodes * attrDim 不匹配。");
-
-            var flags = new float[numNodes];
-
-            for (int i = 0; i < numNodes; i++)
-            {
-                int baseIdx = i * attrDim;
-                float value = attrs[baseIdx + attrIndex];
-                flags[i] = value <= threshold ? 1.0f : 0.0f;
-            }
-
-            return flags;
-        }
-
-        private static int[] BuildSamplingRegionId(
-            float[] nearWallFlag,
-            float[] nearEdgeFlag,
-            float[] nearCornerFlag,
-            int numNodes)
-        {
-            if (nearWallFlag.Length != numNodes ||
-                nearEdgeFlag.Length != numNodes ||
-                nearCornerFlag.Length != numNodes)
-            {
-                throw new InvalidOperationException("区域语义数组长度不一致。");
-            }
-
-            var regionId = new int[numNodes];
-
-            for (int i = 0; i < numNodes; i++)
-            {
-                bool isCorner = nearCornerFlag[i] > 0.5f;
-                bool isEdge = nearEdgeFlag[i] > 0.5f;
-                bool isWall = nearWallFlag[i] > 0.5f;
-
-                // 优先级：角区 > 棱边区 > 近壁区 > 常规区
-                if (isCorner) regionId[i] = 3;
-                else if (isEdge) regionId[i] = 2;
-                else if (isWall) regionId[i] = 1;
-                else regionId[i] = 0;
-            }
-
-            return regionId;
         }
     }
 }
