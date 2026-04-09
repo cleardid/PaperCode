@@ -132,38 +132,40 @@ namespace DynaOrchestrator.Core.PreProcessing
                 return false;
             }
 
-            var lines = File.ReadAllLines(inputKFile);
-
-            bool inNode = false;
             double scale = 0.001; // mm -> m
+            bool inNode = false;
 
-            foreach (var line in lines)
+            // 优化：使用流式读取替代 File.ReadAllLines，避免大文件 OOM
+            using (var reader = new StreamReader(inputKFile, System.Text.Encoding.ASCII))
             {
-                string tLine = line.Trim();
-
-                if (tLine.StartsWith("*"))
+                string? line;
+                while ((line = reader.ReadLine()) != null)
                 {
-                    inNode = tLine.StartsWith("*NODE", StringComparison.OrdinalIgnoreCase);
-                    continue;
-                }
+                    string tLine = line.Trim();
 
-                if (!inNode)
-                {
-                    continue;
-                }
+                    if (tLine.StartsWith("*"))
+                    {
+                        inNode = tLine.StartsWith("*NODE", StringComparison.OrdinalIgnoreCase);
+                        continue;
+                    }
 
-                if (tLine.StartsWith("$") || tLine.Length < 56)
-                {
-                    continue;
-                }
+                    if (!inNode)
+                    {
+                        continue;
+                    }
 
-                // LS-DYNA *NODE 格式:
-                // nid(8), x(16), y(16), z(16)
-                if (double.TryParse(line.Substring(8, 16), out double x) &&
-                    double.TryParse(line.Substring(24, 16), out double y) &&
-                    double.TryParse(line.Substring(40, 16), out double z))
-                {
-                    box.Expand(x * scale, y * scale, z * scale);
+                    if (tLine.StartsWith("$") || tLine.Length < 56)
+                    {
+                        continue;
+                    }
+
+                    // LS-DYNA *NODE 格式: nid(8), x(16), y(16), z(16)
+                    if (double.TryParse(line.Substring(8, 16), out double x) &&
+                        double.TryParse(line.Substring(24, 16), out double y) &&
+                        double.TryParse(line.Substring(40, 16), out double z))
+                    {
+                        box.Expand(x * scale, y * scale, z * scale);
+                    }
                 }
             }
 
@@ -211,27 +213,22 @@ namespace DynaOrchestrator.Core.PreProcessing
             // 1. 优先基于 STL 提取房间包围盒；若失败则回退到 K 文件 *NODE
             var box = BuildBoundingBox(inputKFile, stlMesh, logger);
 
-            // 2. 读取原始 K 文件内容，后续仍用于重写 *INITIAL_VOLUME_FRACTION_GEOMETRY 和追加 tracer
-            var originalLines = File.ReadAllLines(inputKFile).ToList();
-
-            // 输出包围盒与爆炸源信息
             logger?.Invoke($"[解析] 空间包围盒: X[{box.MinX}, {box.MaxX}], Y[{box.MinY}, {box.MaxY}], Z[{box.MinZ}, {box.MaxZ}]");
             logger?.Invoke($"[解析] 爆炸源中心: ({exp.Xc}, {exp.Yc}, {exp.Zc}), 半径: {exp.Radius} mm");
 
-            // 3. 生成自适应测点
+            // 2. 生成自适应测点
             var tracers = GenerateTracers(box, exp, stlMesh, opt, logger);
 
-            // 4. 重写 K 文件
+            // 3. 流式重写 K 文件：边读边写，内存占用极低
+            using (var reader = new StreamReader(inputKFile, System.Text.Encoding.ASCII))
             using (var writer = new StreamWriter(outputKFile, false, System.Text.Encoding.ASCII))
             {
-                // 初始化变量
                 bool inGeometry = false;
                 int geoDataLineCount = 0;
-
-                // 单位转换参数
                 double scaleBack = 1000.0; // m -> mm
+                string? line;
 
-                foreach (var line in originalLines)
+                while ((line = reader.ReadLine()) != null)
                 {
                     string trimmedLine = line.TrimStart();
 
@@ -260,10 +257,9 @@ namespace DynaOrchestrator.Core.PreProcessing
                         geoDataLineCount++;
                         if (geoDataLineCount == 3)
                         {
-                            // 使用不变区域文化严格对齐 F10.0 格式
-                            // 注意：这里直接写入爆炸源中心和半径，单位为 mm，与 K 文件保持一致
+                            // 写入爆炸源中心和半径，单位为 mm，与 K 文件保持一致
                             writer.WriteLine(Fmt10(exp.Xc) + Fmt10(exp.Yc) + Fmt10(exp.Zc) + Fmt10(exp.Radius));
-                            continue;
+                            continue; // 丢弃原文件中的这一行
                         }
                     }
 
