@@ -18,6 +18,12 @@ namespace DynaOrchestrator.Core
     /// </summary>
     internal static class PipelineExecutor
     {
+
+        /// <summary>
+        /// 用于隔离 C++ 端 OpenMP 的多线程全核加速，防止与 C# 端的并发任务发生线程冲突
+        /// </summary>
+        private static readonly object _postProcessLock = new object();
+
         /// <summary>
         /// 执行单个工况的完整流程。
         /// </summary>
@@ -42,20 +48,89 @@ namespace DynaOrchestrator.Core
 
             logger?.Invoke($"[Config] 已加载配置. 爆源(mm): ({exp.Xc}, {exp.Yc}, {exp.Zc}), 当量: {exp.W} kg");
 
-            // [阶段 1] 前处理：基于 STL 与包围盒生成追踪点网格
-            RunPreProcessing(config, other, exp, logger);
+            // 预先推导共用的文件路径
+            string absoluteOutputKFile = Path.GetFullPath(config.OutputKFile);
+            string absoluteStlFile = Path.GetFullPath(config.StlFile);
+            string outDir = Path.GetDirectoryName(absoluteOutputKFile) ?? "";
+            string actualTrhistPath = Path.Combine(outDir, config.TrhistFile);
 
-            // [阶段 2] LS-DYNA 求解：拉起外部求解器进程，并阻塞等待正常终止
-            string actualTrhistPath = RunSimulation(config, appConfig, cancellationToken, logger);
-
-            // [阶段 3] 后处理与图构建：调用 C++ 图引擎，并通过 Span<T> 实现内存零拷贝提取
-            if (config.EnableGraphPostProcessing)
+            // 如果需要执行图特征提取，必须确保 C++ 动态链接库物理存在
+            if (config.EnablePostProcessing)
             {
-                RunPostProcessing(config, exp, other, record, actualTrhistPath, logger);
+                string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DynaOrchestrator.Native.dll");
+                if (!File.Exists(dllPath))
+                {
+                    throw new FileNotFoundException($"系统缺失核心计算引擎组件：未找到 C++ 动态链接库 ({dllPath})。请确保 Native 项目已编译且输出至该目录。");
+                }
+            }
+
+            // 如果跳过了第一阶段（前处理）
+            if (!config.EnablePreProcessing)
+            {
+                // 且要求执行第二阶段：必须有 K 文件
+                if (config.EnableSimulation && !File.Exists(absoluteOutputKFile))
+                    throw new FileNotFoundException($"依赖缺失：已跳过网格生成，但未找到供 LS-DYNA 求解的基础模型 ({absoluteOutputKFile})。如果是全新工况，请务必勾选「前处理」。");
+
+                // 且要求执行第三阶段：必须有 STL 文件作为几何先验
+                if (config.EnablePostProcessing && !File.Exists(absoluteStlFile))
+                    throw new FileNotFoundException($"依赖缺失：已跳过网格生成，但未找到供图引擎做几何遮挡计算的 STL 文件 ({absoluteStlFile})。");
+            }
+
+            // 如果跳过了第二阶段（仿真求解）
+            if (!config.EnableSimulation)
+            {
+                // 且要求执行第三阶段：必须有前置求解产出的 trhist 文件
+                if (config.EnablePostProcessing && !File.Exists(actualTrhistPath))
+                    throw new FileNotFoundException($"依赖缺失：已跳过 LS-DYNA 求解，但未在目录中找到供图特征提取的历史流场文件 ({actualTrhistPath})。");
+            }
+
+            // 如果全部开关都关了，直接记录并返回
+            if (!config.EnablePreProcessing && !config.EnableSimulation && !config.EnablePostProcessing)
+            {
+                logger?.Invoke("[Info] 所有执行阶段均未勾选，该工况直接略过。");
+                return;
+            }
+
+            // [Phase 1] 前处理：基于 STL 与包围盒生成追踪点网格
+            if (config.EnablePreProcessing)
+            {
+                RunPreProcessing(config, other, exp, logger);
             }
             else
             {
-                logger?.Invoke("\n[Phase 3] 已配置为跳过数据构建，工况执行结束。");
+                logger?.Invoke("\n[Phase 1] 已配置为跳过前处理阶段。");
+            }
+
+            // [阶段 2] LS-DYNA 求解：拉起外部求解器进程，并阻塞等待正常终止
+            if (config.EnableSimulation)
+            {
+                actualTrhistPath = RunSimulation(config, appConfig, cancellationToken, logger);
+            }
+            else
+            {
+                logger?.Invoke("\n[Phase 2] 已配置为跳过 LS-DYNA 求解阶段。");
+                if (config.EnablePostProcessing && !File.Exists(actualTrhistPath))
+                {
+                    throw new FileNotFoundException($"跳过了求解，但未在目录中找到供后处理使用的历史文件: {actualTrhistPath}");
+                }
+            }
+
+            // [阶段 3] 后处理与图构建：调用 C++ 图引擎，并通过 Span<T> 实现内存零拷贝提取
+            if (config.EnablePostProcessing)
+            {
+                logger?.Invoke("\n[Phase 3] 准备进行图特征提取...");
+                logger?.Invoke("[排队] 正在等待全局 C++ 引擎锁，以防 OpenMP 线程冲突...");
+
+                // 全局排队：确保同一时刻只有一个工况在调用 C++ DLL 进行特征转储
+                lock (_postProcessLock)
+                {
+                    logger?.Invoke("[获得锁] 开始执行非托管图提取与数据集生成...");
+                    RunPostProcessing(config, exp, other, record, actualTrhistPath, logger);
+                }
+            }
+            else
+            {
+                logger?.Invoke("\n[Phase 3] 已配置为跳过后处理数据构建，工况执行结束。");
             }
         }
 

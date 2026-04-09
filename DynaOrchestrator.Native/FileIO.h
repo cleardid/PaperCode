@@ -3,9 +3,11 @@
 //
 
 // 文件解析方法
-
 #ifndef PI_GNN_GRAPHENGINE_FILEIO_H
 #define PI_GNN_GRAPHENGINE_FILEIO_H
+
+// 禁用安全警告 用于 fopen 的使用
+#define _CRT_SECURE_NO_WARNINGS
 
 #include <vector>
 #include <string>

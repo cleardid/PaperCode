@@ -20,6 +20,13 @@
                     <TextBox Text="{Binding CasesCsvPath, UpdateSourceTrigger=PropertyChanged}" Width="200" VerticalContentAlignment="Center" Margin="0,0,20,0" ToolTip="相对于工作区目录"/>
                 </StackPanel>
 
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <TextBlock Text="执行阶段开关:" VerticalAlignment="Center" FontWeight="Bold" Margin="0,0,10,0"/>
+                    <CheckBox Content="1. 前处理 (网格生成)" IsChecked="{Binding EnablePreProcessing}" VerticalAlignment="Center" Margin="0,0,20,0" ToolTip="取消勾选将跳过基于STL生成网格的过程，直接使用已有K文件。"/>
+                    <CheckBox Content="2. 求解器 (LS-DYNA)" IsChecked="{Binding EnableSimulation}" VerticalAlignment="Center" Margin="0,0,20,0" ToolTip="取消勾选将不启动DYNA计算。"/>
+                    <CheckBox Content="3. 后处理 (特征提取与NPZ)" IsChecked="{Binding EnablePostProcessing}" VerticalAlignment="Center" Margin="0,0,20,0" ToolTip="调用C++非托管库提取特征并保存数据集。"/>
+                </StackPanel>
+
                 <StackPanel Orientation="Horizontal">
                     <Button Content="加载 CSV 列表" Command="{Binding LoadCsvCommand}" Width="120" Margin="0,0,20,0"/>
 
@@ -64,6 +71,15 @@
                                             <DataTrigger Binding="{Binding Status}" Value="Running">
                                                 <Setter Property="Foreground" Value="Blue"/>
                                             </DataTrigger>
+
+                                            <DataTrigger Binding="{Binding Status}" Value="PreProcessed">
+                                                <Setter Property="Foreground" Value="DarkCyan"/>
+                                            </DataTrigger>
+
+                                            <DataTrigger Binding="{Binding Status}" Value="Simulated">
+                                                <Setter Property="Foreground" Value="DarkOrchid"/>
+                                            </DataTrigger>
+
                                             <DataTrigger Binding="{Binding Status}" Value="Success">
                                                 <Setter Property="Foreground" Value="Green"/>
                                             </DataTrigger>

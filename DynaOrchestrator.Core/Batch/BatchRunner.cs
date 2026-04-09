@@ -161,11 +161,13 @@ namespace DynaOrchestrator.Core.Batch
             // 写入总结文件
             WriteSummaryFiles(summaryDir, orderedResults, datasetStage);
 
-            int successCount = orderedResults.Count(r => string.Equals(r.Status, "success", StringComparison.OrdinalIgnoreCase));
-            int canceledCount = orderedResults.Count(r => string.Equals(r.Status, "canceled", StringComparison.OrdinalIgnoreCase));
-            int failedCount = orderedResults.Count(r => string.Equals(r.Status, "failed", StringComparison.OrdinalIgnoreCase));
+            int successCount = orderedResults.Count(r => string.Equals(r.Status, "Success", StringComparison.OrdinalIgnoreCase));
+            int simulatedCount = orderedResults.Count(r => string.Equals(r.Status, "Simulated", StringComparison.OrdinalIgnoreCase));
+            int preprocessedCount = orderedResults.Count(r => string.Equals(r.Status, "PreProcessed", StringComparison.OrdinalIgnoreCase));
+            int failedCount = orderedResults.Count(r => string.Equals(r.Status, "Failed", StringComparison.OrdinalIgnoreCase));
+            int canceledCount = orderedResults.Count(r => string.Equals(r.Status, "Canceled", StringComparison.OrdinalIgnoreCase));
 
-            logger($"[Batch] 批处理完成。成功 {successCount} 条，取消 {canceledCount} 条，失败 {failedCount} 条。");
+            logger($"[Batch] 批处理完成。全流程成功 {successCount} 条，仅求解 {simulatedCount} 条，仅前处理 {preprocessedCount} 条，失败 {failedCount} 条，取消 {canceledCount} 条。");
             logger($"[Batch] 汇总目录: {summaryDir}");
         }
 
@@ -221,6 +223,19 @@ namespace DynaOrchestrator.Core.Batch
                     memoryPerCase,
                     logger);
 
+                // 根据分阶段配置，决定是否重建目录
+                if (caseConfig.Pipeline.EnablePreProcessing)
+                {
+                    // 若执行阶段 1，则彻底清空并重新拷贝基础模型
+                    RecreateCaseDirectory(paths);
+                    paths.CopyBaseFilesToInput(overwrite: true);
+                }
+                else
+                {
+                    // 若跳过阶段 1，严禁删除现有目录，直接确保基础目录结构存在即可
+                    paths.EnsureDirectories();
+                }
+
                 BatchConfigBuilder.WriteConfig(caseConfig, paths.LocalConfigFile);
                 WriteCaseMetadata(paths.LocalCaseMetadataFile, record, paths);
 
@@ -228,17 +243,47 @@ namespace DynaOrchestrator.Core.Batch
                 PipelineExecutor.Execute(
                     caseConfig,
                     record,
-                    cancellationToken: cancellationToken,
-                    logger: logger);
+                    logger: logger,
+                    cancellationToken: cancellationToken);
 
                 // 4. 成功后更新结果及状态
-                result.Status = "success";
+                string finalStatus = "Success";
+                string completedFlag = "1"; // 只有完成第三阶段，才算彻底完结，不再被调度
+
+                // 动态推断执行到达的水位并调用对应的具名接口
+                if (caseConfig.Pipeline.EnablePostProcessing)
+                {
+                    finalStatus = "Success";
+                    completedFlag = "1";
+                    if (!string.IsNullOrWhiteSpace(casesCsvPath))
+                        CaseCsvWriter.MarkSuccess(casesCsvPath, record.CaseId);
+                }
+                else if (caseConfig.Pipeline.EnableSimulation)
+                {
+                    finalStatus = "Simulated";
+                    completedFlag = "0";
+                    if (!string.IsNullOrWhiteSpace(casesCsvPath))
+                        CaseCsvWriter.MarkSimulated(casesCsvPath, record.CaseId);
+                }
+                else if (caseConfig.Pipeline.EnablePreProcessing)
+                {
+                    finalStatus = "PreProcessed";
+                    completedFlag = "0";
+                    if (!string.IsNullOrWhiteSpace(casesCsvPath))
+                        CaseCsvWriter.MarkPreProcessed(casesCsvPath, record.CaseId);
+                }
+                else
+                {
+                    finalStatus = "Skipped";
+                    completedFlag = "0";
+                }
+
+                result.Status = finalStatus;
                 result.Message = "OK";
                 result.ExitCode = 0;
 
-                UpdateRuntimeState(record, "Success", "1", uiStateUpdater);
-                if (!string.IsNullOrWhiteSpace(casesCsvPath))
-                    CaseCsvWriter.MarkSuccess(casesCsvPath, record.CaseId);
+                // 同步更新内存中的 Record，以驱动 WPF 界面数据绑定刷新
+                UpdateRuntimeState(record, finalStatus, completedFlag, uiStateUpdater);
             }
             catch (OperationCanceledException)
             {
@@ -344,68 +389,60 @@ namespace DynaOrchestrator.Core.Batch
 
             string runSummaryCsv = Path.Combine(summaryDir, "run_summary.csv");
             string successCsv = Path.Combine(summaryDir, "success_cases.csv");
+            string simulatedCsv = Path.Combine(summaryDir, "simulated_cases.csv");
+            string preprocessedCsv = Path.Combine(summaryDir, "preprocessed_cases.csv");
             string failedCsv = Path.Combine(summaryDir, "failed_cases.csv");
+            string canceledCsv = Path.Combine(summaryDir, "canceled_cases.csv");
             string summaryJson = Path.Combine(summaryDir, "run_summary.json");
 
-            var allLines = new List<string>
-            {
-                "CaseId,GeomType,DatasetStage,Status,Message,InputDir,OutputDir,StartTime,EndTime,DurationSeconds,ExitCode"
-            };
-
-            var successLines = new List<string>
-            {
-                "CaseId,GeomType,DatasetStage,DurationSeconds"
-            };
-
-            var failedLines = new List<string>
-            {
-                "CaseId,GeomType,DatasetStage,Message"
-            };
+            var allLines = new List<string> { "CaseId,GeomType,DatasetStage,Status,Message,InputDir,OutputDir,StartTime,EndTime,DurationSeconds,ExitCode" };
+            var successLines = new List<string> { "CaseId,GeomType,DatasetStage,DurationSeconds" };
+            var simulatedLines = new List<string> { "CaseId,GeomType,DatasetStage,DurationSeconds" };
+            var preprocessedLines = new List<string> { "CaseId,GeomType,DatasetStage,DurationSeconds" };
+            var failedLines = new List<string> { "CaseId,GeomType,DatasetStage,Message" };
+            var canceledLines = new List<string> { "CaseId,GeomType,DatasetStage,Message" };
 
             foreach (var r in results)
             {
                 allLines.Add(string.Join(",",
-                    EscapeCsv(r.CaseId),
-                    EscapeCsv(r.GeomType),
-                    EscapeCsv(r.DatasetStage),
-                    EscapeCsv(r.Status),
-                    EscapeCsv(r.Message),
-                    EscapeCsv(r.InputDir),
-                    EscapeCsv(r.OutputDir),
+                    EscapeCsv(r.CaseId), EscapeCsv(r.GeomType), EscapeCsv(r.DatasetStage),
+                    EscapeCsv(r.Status), EscapeCsv(r.Message), EscapeCsv(r.InputDir), EscapeCsv(r.OutputDir),
                     EscapeCsv(r.StartTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
                     EscapeCsv(r.EndTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
                     EscapeCsv(r.DurationSeconds.ToString("F3", CultureInfo.InvariantCulture)),
                     EscapeCsv(r.ExitCode.ToString(CultureInfo.InvariantCulture))));
 
-                if (string.Equals(r.Status, "success", StringComparison.OrdinalIgnoreCase))
-                {
-                    successLines.Add(string.Join(",",
-                        EscapeCsv(r.CaseId),
-                        EscapeCsv(r.GeomType),
-                        EscapeCsv(r.DatasetStage),
-                        EscapeCsv(r.DurationSeconds.ToString("F3", CultureInfo.InvariantCulture))));
-                }
-                else
-                {
-                    failedLines.Add(string.Join(",",
-                        EscapeCsv(r.CaseId),
-                        EscapeCsv(r.GeomType),
-                        EscapeCsv(r.DatasetStage),
-                        EscapeCsv(r.Message)));
-                }
+                if (string.Equals(r.Status, "Success", StringComparison.OrdinalIgnoreCase))
+                    successLines.Add(string.Join(",", EscapeCsv(r.CaseId), EscapeCsv(r.GeomType), EscapeCsv(r.DatasetStage), EscapeCsv(r.DurationSeconds.ToString("F3", CultureInfo.InvariantCulture))));
+                else if (string.Equals(r.Status, "Simulated", StringComparison.OrdinalIgnoreCase))
+                    simulatedLines.Add(string.Join(",", EscapeCsv(r.CaseId), EscapeCsv(r.GeomType), EscapeCsv(r.DatasetStage), EscapeCsv(r.DurationSeconds.ToString("F3", CultureInfo.InvariantCulture))));
+                else if (string.Equals(r.Status, "PreProcessed", StringComparison.OrdinalIgnoreCase))
+                    preprocessedLines.Add(string.Join(",", EscapeCsv(r.CaseId), EscapeCsv(r.GeomType), EscapeCsv(r.DatasetStage), EscapeCsv(r.DurationSeconds.ToString("F3", CultureInfo.InvariantCulture))));
+                else if (string.Equals(r.Status, "Failed", StringComparison.OrdinalIgnoreCase))
+                    failedLines.Add(string.Join(",", EscapeCsv(r.CaseId), EscapeCsv(r.GeomType), EscapeCsv(r.DatasetStage), EscapeCsv(r.Message)));
+                else if (string.Equals(r.Status, "Canceled", StringComparison.OrdinalIgnoreCase))
+                    canceledLines.Add(string.Join(",", EscapeCsv(r.CaseId), EscapeCsv(r.GeomType), EscapeCsv(r.DatasetStage), EscapeCsv(r.Message)));
             }
 
             File.WriteAllLines(runSummaryCsv, allLines, Encoding.UTF8);
-            File.WriteAllLines(successCsv, successLines, Encoding.UTF8);
-            File.WriteAllLines(failedCsv, failedLines, Encoding.UTF8);
+
+            // 仅当包含实际数据时才写入磁盘
+            if (successLines.Count > 1) File.WriteAllLines(successCsv, successLines, Encoding.UTF8);
+            if (simulatedLines.Count > 1) File.WriteAllLines(simulatedCsv, simulatedLines, Encoding.UTF8);
+            if (preprocessedLines.Count > 1) File.WriteAllLines(preprocessedCsv, preprocessedLines, Encoding.UTF8);
+            if (failedLines.Count > 1) File.WriteAllLines(failedCsv, failedLines, Encoding.UTF8);
+            if (canceledLines.Count > 1) File.WriteAllLines(canceledCsv, canceledLines, Encoding.UTF8);
 
             var summaryObj = new
             {
                 DatasetStage = datasetStage,
                 Total = results.Count,
-                Success = results.Count(r => string.Equals(r.Status, "success", StringComparison.OrdinalIgnoreCase)),
-                Failed = results.Count(r => string.Equals(r.Status, "failed", StringComparison.OrdinalIgnoreCase)),
-                Canceled = results.Count(r => string.Equals(r.Status, "canceled", StringComparison.OrdinalIgnoreCase)),
+                Success = results.Count(r => string.Equals(r.Status, "Success", StringComparison.OrdinalIgnoreCase)),
+                Simulated = results.Count(r => string.Equals(r.Status, "Simulated", StringComparison.OrdinalIgnoreCase)),
+                PreProcessed = results.Count(r => string.Equals(r.Status, "PreProcessed", StringComparison.OrdinalIgnoreCase)),
+                Skipped = results.Count(r => string.Equals(r.Status, "Skipped", StringComparison.OrdinalIgnoreCase)),
+                Failed = results.Count(r => string.Equals(r.Status, "Failed", StringComparison.OrdinalIgnoreCase)),
+                Canceled = results.Count(r => string.Equals(r.Status, "Canceled", StringComparison.OrdinalIgnoreCase)),
                 GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
             };
 

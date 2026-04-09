@@ -27,6 +27,22 @@ namespace DynaOrchestrator.Core.Batch
             UpdateRecord(csvPath, caseId, "0", "Running");
         }
 
+        /// <summary>
+        /// 标记工况为仅完成前处理（网格生成），此时 Completed 仍为 0
+        /// </summary>
+        public static void MarkPreProcessed(string csvPath, string caseId)
+        {
+            UpdateRecord(csvPath, caseId, "0", "PreProcessed");
+        }
+
+        /// <summary>
+        /// 标记工况为仅完成求解器（DYNA计算），此时 Completed 仍为 0
+        /// </summary>
+        public static void MarkSimulated(string csvPath, string caseId)
+        {
+            UpdateRecord(csvPath, caseId, "0", "Simulated");
+        }
+
         public static void MarkSuccess(string csvPath, string caseId)
         {
             UpdateRecord(csvPath, caseId, "1", "Success");

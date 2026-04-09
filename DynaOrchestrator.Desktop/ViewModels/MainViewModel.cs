@@ -59,6 +59,24 @@ namespace DynaOrchestrator.Desktop.ViewModels
             set { _baseConfig.Workspace.MemoryPerCase = value; OnPropertyChanged(); }
         }
 
+        public bool EnablePreProcessing
+        {
+            get => _baseConfig.Pipeline.EnablePreProcessing;
+            set { _baseConfig.Pipeline.EnablePreProcessing = value; OnPropertyChanged(); SaveBaseConfig(); }
+        }
+
+        public bool EnableSimulation
+        {
+            get => _baseConfig.Pipeline.EnableSimulation;
+            set { _baseConfig.Pipeline.EnableSimulation = value; OnPropertyChanged(); SaveBaseConfig(); }
+        }
+
+        public bool EnablePostProcessing
+        {
+            get => _baseConfig.Pipeline.EnablePostProcessing;
+            set { _baseConfig.Pipeline.EnablePostProcessing = value; OnPropertyChanged(); SaveBaseConfig(); }
+        }
+
         private bool _isRunning;
         /// <summary>
         ///  用于更新按钮状态
@@ -117,6 +135,27 @@ namespace DynaOrchestrator.Desktop.ViewModels
             OnPropertyChanged(nameof(MaxParallelCases));
             OnPropertyChanged(nameof(NcpuPerCase));
             OnPropertyChanged(nameof(MemoryPerCase));
+            OnPropertyChanged(nameof(EnablePreProcessing));
+            OnPropertyChanged(nameof(EnableSimulation));
+            OnPropertyChanged(nameof(EnablePostProcessing));
+        }
+
+        /// <summary>
+        /// 同步保存当前的基础配置到 config.json
+        /// </summary>
+        private void SaveBaseConfig()
+        {
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string fullConfigPath = Path.Combine(baseDir, _configPath);
+                string json = JsonSerializer.Serialize(_baseConfig, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(fullConfigPath, json);
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"[Error] 同步保存配置文件失败: {ex.Message}");
+            }
         }
 
         /// <summary>
