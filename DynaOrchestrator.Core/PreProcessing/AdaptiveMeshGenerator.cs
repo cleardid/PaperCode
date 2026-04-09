@@ -216,8 +216,11 @@ namespace DynaOrchestrator.Core.PreProcessing
             logger?.Invoke($"[解析] 空间包围盒: X[{box.MinX}, {box.MaxX}], Y[{box.MinY}, {box.MaxY}], Z[{box.MinZ}, {box.MaxZ}]");
             logger?.Invoke($"[解析] 爆炸源中心: ({exp.Xc}, {exp.Yc}, {exp.Zc}), 半径: {exp.Radius} mm");
 
-            // 2. 生成自适应测点
-            var tracers = GenerateTracers(box, exp, stlMesh, opt, logger);
+            //var tracers = GenerateTracers(box, exp, stlMesh, opt, logger);
+            // 2. 在开始生成测点前，预先构建加速器（仅耗时数毫秒）
+            var accelerator = new MeshAccelerator(stlMesh, box);
+            // 然后生成自适应观测点
+            var tracers = GenerateTracers(box, exp, stlMesh, accelerator, opt, logger);
 
             // 3. 流式重写 K 文件：边读边写，内存占用极低
             using (var reader = new StreamReader(inputKFile, System.Text.Encoding.ASCII))
@@ -292,7 +295,7 @@ namespace DynaOrchestrator.Core.PreProcessing
         /// <param name="stlMesh">STL网格</param>
         /// <param name="opt">其他配置</param>
         /// <returns>测点列表</returns>
-        private static List<TracerPoint> GenerateTracers(BoundingBox box, ExplosiveParams exp, List<Triangle> stlMesh, OtherConfig opt, Action<string>? logger)
+        private static List<TracerPoint> GenerateTracers(BoundingBox box, ExplosiveParams exp, List<Triangle> stlMesh, MeshAccelerator accelerator, OtherConfig opt, Action<string>? logger)
         {
             // 声明结果
             var tracers = new List<TracerPoint>();
@@ -356,7 +359,7 @@ namespace DynaOrchestrator.Core.PreProcessing
 
                         // 先判断该点是否位于封闭 STL 内部
                         var p = new Vector3 { X = x, Y = y, Z = z };
-                        if (!IsInsideClosedMesh(p, stlMesh))
+                        if (!IsInsideClosedMesh(p, accelerator))
                         {
                             continue;
                         }
@@ -408,45 +411,44 @@ namespace DynaOrchestrator.Core.PreProcessing
         /// <param name="p">要判断的点 </param>
         /// <param name="stlMesh">STL 网格 </param>
         /// <returns>如果点在网格内部则返回 true，否则返回 false </returns>
-        private static bool IsInsideClosedMesh(Vector3 p, List<Triangle> stlMesh)
+        private static bool IsInsideClosedMesh(Vector3 p, MeshAccelerator accelerator)
         {
             const double eps = 1e-9;
-
             var px = new Vector3 { X = p.X + eps, Y = p.Y + eps, Z = p.Z + eps };
 
+            int intersectionsX = 0, intersectionsY = 0, intersectionsZ = 0;
+
+            // X 轴射线求交
             var dirX = new Vector3 { X = 1.0, Y = 0.0, Z = 0.0 };
-            var dirY = new Vector3 { X = 0.0, Y = 1.0, Z = 0.0 };
-            var dirZ = new Vector3 { X = 0.0, Y = 0.0, Z = 1.0 };
-
-            int votes = 0;
-            if ((CountRayIntersections(px, dirX, stlMesh) & 1) == 1) votes++;
-            if ((CountRayIntersections(px, dirY, stlMesh) & 1) == 1) votes++;
-            if ((CountRayIntersections(px, dirZ, stlMesh) & 1) == 1) votes++;
-
-            return votes >= 2;
-        }
-
-        /// <summary>
-        /// 计算从 origin 点沿 direction 方向发射的射线与 STL 网格的交点数量
-        /// </summary>
-        /// <param name="origin">射线起点</param>
-        /// <param name="direction">射线方向</param>
-        /// <param name="stlMesh">STL 网格</param>
-        /// <returns>交点数量</returns>
-        private static int CountRayIntersections(Vector3 origin, Vector3 direction, List<Triangle> stlMesh)
-        {
-            int count = 0;
-
-            foreach (var tri in stlMesh)
+            foreach (var tri in accelerator.GetCandidatesRayX(px.X, px.Y, px.Z))
             {
-                if (RayIntersectsTriangle(origin, direction, tri, out double t))
-                {
-                    if (t > 1e-9)
-                        count++;
-                }
+                if (RayIntersectsTriangle(px, dirX, tri, out double t) && t > eps)
+                    intersectionsX++;
             }
 
-            return count;
+            // Y 轴射线求交
+            var dirY = new Vector3 { X = 0.0, Y = 1.0, Z = 0.0 };
+            foreach (var tri in accelerator.GetCandidatesRayY(px.X, px.Y, px.Z))
+            {
+                if (RayIntersectsTriangle(px, dirY, tri, out double t) && t > eps)
+                    intersectionsY++;
+            }
+
+            // Z 轴射线求交
+            var dirZ = new Vector3 { X = 0.0, Y = 0.0, Z = 1.0 };
+            foreach (var tri in accelerator.GetCandidatesRayZ(px.X, px.Y, px.Z))
+            {
+                if (RayIntersectsTriangle(px, dirZ, tri, out double t) && t > eps)
+                    intersectionsZ++;
+            }
+
+            // 多数投票原则
+            int votes = 0;
+            if (intersectionsX % 2 != 0) votes++;
+            if (intersectionsY % 2 != 0) votes++;
+            if (intersectionsZ % 2 != 0) votes++;
+
+            return votes >= 2;
         }
 
         /// <summary>
