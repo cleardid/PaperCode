@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using DynaOrchestrator.Core.Solver;
+using DynaOrchestrator.Core.Utils;
 
 namespace DynaOrchestrator.Core.Batch
 {
@@ -47,10 +48,8 @@ namespace DynaOrchestrator.Core.Batch
                 throw new ArgumentNullException(nameof(baseConfig));
             if (records == null || records.Count == 0)
                 throw new ArgumentException("传入的工况列表为空。", nameof(records));
-            if (maxParallelCases <= 0)
-                throw new ArgumentOutOfRangeException(nameof(maxParallelCases), "maxParallelCases 必须大于 0。");
-            if (ncpuPerCase <= 0)
-                throw new ArgumentOutOfRangeException(nameof(ncpuPerCase), "ncpuPerCase 必须大于 0。");
+            WorkspaceSettingsValidator.ValidateBatchSettings(maxParallelCases, ncpuPerCase, memoryPerCase);
+            memoryPerCase = WorkspaceSettingsValidator.NormalizeMemoryPerCase(memoryPerCase);
 
             logger("========== 启动批处理模式 ==========");
 
@@ -77,13 +76,19 @@ namespace DynaOrchestrator.Core.Batch
             string summaryDir = Path.Combine(fullBatchRoot, "runs", datasetStage, "summary");
             Directory.CreateDirectory(summaryDir);
 
-            // 筛选出未完成的工况
-            var pendingRecords = records.Where(r => !r.IsCompleted).ToList();
-            logger($"[Batch] 未完成工况数: {pendingRecords.Count}");
-            // 如果没有可执行工况，则直接返回
-            if (pendingRecords.Count == 0)
+            // 仅调度与当前流水线阶段相匹配的工况，避免把所有 Completed=0 的记录都误判为可执行。
+            var runnableRecords = records.Where(r => ShouldRunRecord(r, baseConfig.Pipeline)).ToList();
+            logger($"[Batch] 可执行工况数: {runnableRecords.Count}");
+
+            int nonCompletedButSkippedCount = records.Count(r => !r.IsCompleted) - runnableRecords.Count;
+            if (nonCompletedButSkippedCount > 0)
             {
-                logger("[Batch] 所有工况均已完成，无需重复执行。");
+                logger($"[Batch] 另有 {nonCompletedButSkippedCount} 条工况虽未完成，但当前状态与本次流水线不匹配，已跳过调度。");
+            }
+
+            if (runnableRecords.Count == 0)
+            {
+                logger("[Batch] 没有与当前流水线阶段匹配的待执行工况。");
                 return;
             }
 
@@ -94,7 +99,7 @@ namespace DynaOrchestrator.Core.Batch
             var semaphore = new SemaphoreSlim(maxParallelCases, maxParallelCases);
 
             // 构建并发任务
-            var tasks = pendingRecords.Select(async record =>
+            var tasks = runnableRecords.Select(async record =>
             {
                 bool semaphoreAcquired = false;
 
@@ -348,6 +353,70 @@ namespace DynaOrchestrator.Core.Batch
                 record.Completed = completed;
                 record.LastRunTime = lastRunTime;
             }
+        }
+
+        private static bool ShouldRunRecord(BatchCaseRecord record, PipelineConfig pipeline)
+        {
+            if (record == null)
+                return false;
+
+            if (record.IsCompleted)
+                return false;
+
+            string status = (record.Status ?? string.Empty).Trim();
+
+            bool pre = pipeline.EnablePreProcessing;
+            bool sim = pipeline.EnableSimulation;
+            bool post = pipeline.EnablePostProcessing;
+
+            // 没有启用任何阶段时，不执行
+            if (!pre && !sim && !post)
+                return false;
+
+            // 仅执行第三步：必须已经完成前两步，状态为 Simulated
+            if (!pre && !sim && post)
+            {
+                return string.Equals(status, "Simulated", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // 仅执行第二步：通常用于从前处理结果继续求解
+            if (!pre && sim && !post)
+            {
+                return string.IsNullOrWhiteSpace(status)
+                       || string.Equals(status, "Pending", StringComparison.OrdinalIgnoreCase)
+                       || string.Equals(status, "PreProcessed", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // 仅执行第一步：只允许 Pending 进入
+            if (pre && !sim && !post)
+            {
+                return string.IsNullOrWhiteSpace(status)
+                       || string.Equals(status, "Pending", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // 执行前两步：允许 Pending 进入
+            if (pre && sim && !post)
+            {
+                return string.IsNullOrWhiteSpace(status)
+                       || string.Equals(status, "Pending", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // 执行第二步+第三步：允许从前处理完成的状态继续
+            if (!pre && sim && post)
+            {
+                return string.IsNullOrWhiteSpace(status)
+                       || string.Equals(status, "Pending", StringComparison.OrdinalIgnoreCase)
+                       || string.Equals(status, "PreProcessed", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // 执行全流程：只允许 Pending 进入
+            if (pre && sim && post)
+            {
+                return string.IsNullOrWhiteSpace(status)
+                       || string.Equals(status, "Pending", StringComparison.OrdinalIgnoreCase);
+            }
+
+            return false;
         }
 
         private static void RecreateCaseDirectory(BatchCasePaths paths)

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using DynaOrchestrator.Core.Models;
+using DynaOrchestrator.Core.Utils;
 
 namespace DynaOrchestrator.Core.Solver
 {
@@ -25,8 +26,21 @@ namespace DynaOrchestrator.Core.Solver
 
             try
             {
+                WorkspaceSettingsValidator.ValidateBatchSettings(1, ncpu, memory);
+                string normalizedMemory = WorkspaceSettingsValidator.NormalizeMemoryPerCase(memory);
+
+                if (string.IsNullOrWhiteSpace(config.LsDynaPath))
+                    throw new FileNotFoundException("未配置 LS-DYNA 求解器路径。", config.LsDynaPath);
+
+                string fullSolverPath = Path.GetFullPath(config.LsDynaPath);
+                if (!File.Exists(fullSolverPath))
+                    throw new FileNotFoundException($"未找到 LS-DYNA 求解器: {fullSolverPath}", fullSolverPath);
+
                 // 1. 获取输入 K 文件的绝对路径和所在目录
                 string fullKFilePath = Path.GetFullPath(config.OutputKFile);
+                if (!File.Exists(fullKFilePath))
+                    throw new FileNotFoundException($"未找到待求解的 K 文件: {fullKFilePath}", fullKFilePath);
+
                 string workDir = Path.GetDirectoryName(fullKFilePath) ?? string.Empty;
 
                 if (!Directory.Exists(workDir))
@@ -34,8 +48,8 @@ namespace DynaOrchestrator.Core.Solver
 
                 var startInfo = new ProcessStartInfo
                 {
-                    FileName = config.LsDynaPath,
-                    Arguments = $"i={Path.GetFileName(fullKFilePath)} memory={memory} ncpu={ncpu}",
+                    FileName = fullSolverPath,
+                    Arguments = $"i=\"{Path.GetFileName(fullKFilePath)}\" memory={normalizedMemory} ncpu={ncpu}",
                     WorkingDirectory = workDir,
                     UseShellExecute = false,
                     CreateNoWindow = true,

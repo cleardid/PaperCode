@@ -2,6 +2,7 @@
 using System.IO;
 using System.Text.Json;
 using DynaOrchestrator.Core.Models;
+using DynaOrchestrator.Core.Utils;
 
 namespace DynaOrchestrator.Core.Batch
 {
@@ -71,6 +72,13 @@ namespace DynaOrchestrator.Core.Batch
             config.Explosive.Radius = CalculateRadiusMm(record.ChargeMass, record.ChargeDensity);
 
             logger?.Invoke($"计算的炸药半径为 {config.Explosive.Radius} mm。");
+
+            // ---------------- WorkspaceConfig ----------------
+            // 将批处理入口传入的资源参数显式写回派生配置，避免后续执行阶段继续读取到基础配置中的旧值。
+            config.Workspace.NcpuPerCase = ncpuPerCase;
+            config.Workspace.MemoryPerCase = WorkspaceSettingsValidator.NormalizeMemoryPerCase(memoryPerCase);
+
+            logger?.Invoke($"批处理资源参数: ncpu={config.Workspace.NcpuPerCase}, memory={config.Workspace.MemoryPerCase}");
 
             // ---------------- OtherConfig ----------------
             // 直接深拷贝原始配置，不做单位换算。

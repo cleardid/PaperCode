@@ -31,32 +31,72 @@ namespace DynaOrchestrator.Desktop.ViewModels
         public string WorkspaceRootDir
         {
             get => _baseConfig.Workspace.RootDir;
-            set { _baseConfig.Workspace.RootDir = value; OnPropertyChanged(); }
+            set
+            {
+                if (_baseConfig.Workspace.RootDir == value) return;
+                _baseConfig.Workspace.RootDir = value;
+                OnPropertyChanged();
+                SaveBaseConfig();
+            }
         }
 
         public string CasesCsvPath
         {
             get => _baseConfig.Workspace.CasesCsv;
-            set { _baseConfig.Workspace.CasesCsv = value; OnPropertyChanged(); }
+            set
+            {
+                if (_baseConfig.Workspace.CasesCsv == value) return;
+                _baseConfig.Workspace.CasesCsv = value;
+                OnPropertyChanged();
+                SaveBaseConfig();
+            }
         }
 
         // --- 绑定到 UI 的全局执行参数 ---
         public int MaxParallelCases
         {
             get => _baseConfig.Workspace.MaxParallelCases;
-            set { _baseConfig.Workspace.MaxParallelCases = value; OnPropertyChanged(); }
+            set
+            {
+                if (_baseConfig.Workspace.MaxParallelCases == value) return;
+                _baseConfig.Workspace.MaxParallelCases = value;
+                OnPropertyChanged();
+                SaveBaseConfig();
+            }
         }
 
         public int NcpuPerCase
         {
             get => _baseConfig.Workspace.NcpuPerCase;
-            set { _baseConfig.Workspace.NcpuPerCase = value; OnPropertyChanged(); }
+            set
+            {
+                if (_baseConfig.Workspace.NcpuPerCase == value) return;
+                _baseConfig.Workspace.NcpuPerCase = value;
+                OnPropertyChanged();
+                SaveBaseConfig();
+            }
         }
 
         public string MemoryPerCase
         {
             get => _baseConfig.Workspace.MemoryPerCase;
-            set { _baseConfig.Workspace.MemoryPerCase = value; OnPropertyChanged(); }
+            set
+            {
+                if (_baseConfig.Workspace.MemoryPerCase == value) return;
+                _baseConfig.Workspace.MemoryPerCase = value;
+                OnPropertyChanged();
+
+                try
+                {
+                    _baseConfig.Workspace.MemoryPerCase = WorkspaceSettingsValidator.NormalizeMemoryPerCase(value);
+                    OnPropertyChanged();
+                    SaveBaseConfig();
+                }
+                catch
+                {
+                    // 文本框允许用户继续编辑到合法值；仅当格式合法时才持久化到 config.json。
+                }
+            }
         }
 
         public bool EnablePreProcessing
@@ -206,16 +246,139 @@ namespace DynaOrchestrator.Desktop.ViewModels
         }
 
         /// <summary>
+        /// 确认批处理任务是否可以开始
+        /// </summary>
+        /// <param name="normalizedMemoryPerCase"></param>
+        /// <returns></returns>
+        private bool ConfirmBatchStart(string normalizedMemoryPerCase)
+        {
+            bool isPreOnly = EnablePreProcessing && !EnableSimulation && !EnablePostProcessing;
+            bool isSimOnly = !EnablePreProcessing && EnableSimulation && !EnablePostProcessing;
+            bool isPostOnly = !EnablePreProcessing && !EnableSimulation && EnablePostProcessing;
+            bool isPreSim = EnablePreProcessing && EnableSimulation && !EnablePostProcessing;
+            bool isSimPost = !EnablePreProcessing && EnableSimulation && EnablePostProcessing;
+            bool isFullPipeline = EnablePreProcessing && EnableSimulation && EnablePostProcessing;
+            bool isAllDisabled = !EnablePreProcessing && !EnableSimulation && !EnablePostProcessing;
+
+            string modeName;
+            if (isFullPipeline)
+                modeName = "全流程（前处理 + 求解 + 后处理）";
+            else if (isPreSim)
+                modeName = "前两步（前处理 + 求解）";
+            else if (isPostOnly)
+                modeName = "仅第三步（后处理）";
+            else if (isPreOnly)
+                modeName = "仅第一步（前处理）";
+            else if (isSimOnly)
+                modeName = "仅第二步（求解）";
+            else if (isSimPost)
+                modeName = "后两步（求解 + 后处理）";
+            else
+                modeName = "未选择任何阶段";
+
+            string warning = string.Empty;
+
+            if (isAllDisabled)
+            {
+                warning =
+                    "警告：当前三个阶段全部关闭，本次不会执行任何任务。\n" +
+                    "请返回检查勾选状态。\n\n";
+            }
+            else if (isPostOnly)
+            {
+                warning =
+                    "警告：当前为“仅第三步”模式。\n" +
+                    "只有状态为 Simulated 且 run/trhist 已存在的工况才能正常执行。\n" +
+                    "如果前两步未完成，相关工况会被跳过或失败。\n\n";
+            }
+            else if (isSimOnly)
+            {
+                warning =
+                    "提示：当前为“仅第二步”模式。\n" +
+                    "通常要求对应工况已经完成前处理，并具备可直接求解的输入文件。\n\n";
+            }
+            else if (isPreOnly)
+            {
+                warning =
+                    "提示：当前为“仅第一步”模式。\n" +
+                    "本轮结束后工况通常会停留在 PreProcessed 状态，不会直接完成整体流程。\n\n";
+            }
+            else if (isPreSim)
+            {
+                warning =
+                    "提示：当前为“前两步”模式。\n" +
+                    "本轮结束后工况通常会停留在 Simulated 状态，适合后续统一执行第三步。\n\n";
+            }
+            else if (isSimPost)
+            {
+                warning =
+                    "提示：当前为“后两步”模式。\n" +
+                    "通常要求工况已经完成前处理。\n\n";
+            }
+
+            string modeSummary =
+                $"{warning}" +
+                $"执行模式: {modeName}\n\n" +
+                $"前处理: {(EnablePreProcessing ? "开启" : "关闭")}\n" +
+                $"求解: {(EnableSimulation ? "开启" : "关闭")}\n" +
+                $"后处理: {(EnablePostProcessing ? "开启" : "关闭")}\n\n" +
+                $"最大并发工况数: {MaxParallelCases}\n" +
+                $"每工况 CPU 数: {NcpuPerCase}\n" +
+                $"每工况内存: {normalizedMemoryPerCase}\n\n" +
+                "确认按以上配置开始批处理吗？";
+
+            var image = (isAllDisabled || isPostOnly)
+                ? MessageBoxImage.Warning
+                : MessageBoxImage.Question;
+
+            var result = MessageBox.Show(
+                modeSummary,
+                "确认批处理执行配置",
+                MessageBoxButton.YesNo,
+                image,
+                MessageBoxResult.No);
+
+            return result == MessageBoxResult.Yes;
+        }
+
+        /// <summary>
         /// 启动批处理任务
         /// </summary>
         private async void StartBatch()
         {
+            bool isPostOnlyMode = !EnablePreProcessing && !EnableSimulation && EnablePostProcessing;
+
+            string normalizedMemoryPerCase;
+            try
+            {
+                normalizedMemoryPerCase = WorkspaceSettingsValidator.NormalizeMemoryPerCase(MemoryPerCase);
+                WorkspaceSettingsValidator.ValidateBatchSettings(MaxParallelCases, NcpuPerCase, normalizedMemoryPerCase);
+                MemoryPerCase = normalizedMemoryPerCase;
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"[Error] 批处理配置无效: {ex.Message}");
+                return;
+            }
+
+            // --- 新增：启动前弹框确认 ---
+            if (!ConfirmBatchStart(normalizedMemoryPerCase))
+            {
+                AppendLog("[UI] 用户取消了本次批处理启动。");
+                return;
+            }
+
             // --- 1. 运行前状态重置 ---
-            // 无论是因为点击了“停止”，还是之前的残留错误
-            // 我们将所有非 Success 的任务（Running, Failed, Canceled）统一重置为 Pending
+            // Running 说明上次异常中断，始终重置为 Pending。
+            // 但在“只跑第三步”模式下，绝不能把 Failed/Canceled 重置为 Pending，
+            // 否则会把没有 trhist 的 case 混进来。
             foreach (var record in Cases)
             {
-                if (record.Status == "Running" || record.Status == "Failed" || record.Status == "Canceled")
+                if (record.Status == "Running")
+                {
+                    record.Status = "Pending";
+                }
+                else if (!isPostOnlyMode && (record.Status == "Failed" || record.Status == "Canceled"))
                 {
                     record.Status = "Pending";
                 }
@@ -230,14 +393,11 @@ namespace DynaOrchestrator.Desktop.ViewModels
             try
             {
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                // 在启动批处理任务之前，LoadCsv 方法中已经进行空值检查，因此这里不再重复检查
                 string workspaceRoot = Path.GetFullPath(Path.Combine(baseDir, WorkspaceRootDir));
                 string fullCsvPath = Path.GetFullPath(Path.Combine(workspaceRoot, CasesCsvPath));
 
-                // 由 BatchRunner 内部识别 Status 进行过滤，即仅执行状态为 Pending 的记录
                 var recordList = new List<BatchCaseRecord>(Cases);
 
-                // 1. 实例化日志缓冲器，约每 200ms 批量更新一次 UI
                 using var logBuffer = new AsyncLogBuffer(mergedMessages =>
                 {
                     Application.Current.Dispatcher.InvokeAsync(() =>
@@ -256,10 +416,9 @@ namespace DynaOrchestrator.Desktop.ViewModels
                         ncpuPerCase: NcpuPerCase,
                         memoryPerCase: MemoryPerCase,
                         records: recordList,
-                        logger: logBuffer.Log, // 2. 核心代码直接将日志写入内存队列，瞬间返回
+                        logger: logBuffer.Log,
                         uiStateUpdater: (record, status, completed, lastRunTime) =>
                         {
-                            // 3. 状态更新改用 InvokeAsync，避免阻塞后台调度线程
                             Application.Current.Dispatcher.InvokeAsync(() =>
                             {
                                 record.Status = status;
@@ -271,7 +430,6 @@ namespace DynaOrchestrator.Desktop.ViewModels
                     );
                 });
 
-                // 4. 批处理任务结束后，强制刷出队列中可能残留的最后几条日志
                 logBuffer.FlushNow();
             }
             catch (Exception ex)
