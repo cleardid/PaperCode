@@ -94,5 +94,50 @@ namespace DynaOrchestrator.Core.Solver
             ReadOnlySpan<byte> byteData = MemoryMarshal.AsBytes(data);
             stream.Write(byteData);
         }
+
+        public static void ValidateBasicStructure(string npzPath, Action<string>? logger = null)
+        {
+            if (string.IsNullOrWhiteSpace(npzPath))
+                throw new ArgumentException("NPZ 路径不能为空。", nameof(npzPath));
+
+            if (!File.Exists(npzPath))
+                throw new FileNotFoundException("未找到 NPZ 文件。", npzPath);
+
+            var fileInfo = new FileInfo(npzPath);
+            if (fileInfo.Length <= 0)
+                throw new InvalidDataException($"NPZ 文件为空：{npzPath}");
+
+            string[] requiredEntries =
+            {
+                "edge_index_row.npy",
+                "edge_index_col.npy",
+                "edge_weight.npy",
+                "x.npy",
+                "node_attr.npy",
+                "p_max.npy",
+                "t_arrival.npy",
+                "positive_impulse.npy",
+                "positive_duration.npy",
+                "near_wall_flag.npy",
+                "near_edge_flag.npy",
+                "near_corner_flag.npy",
+                "sampling_region_id.npy",
+                "case_cond.npy"
+            };
+
+            using var archive = ZipFile.OpenRead(npzPath);
+
+            foreach (string entryName in requiredEntries)
+            {
+                var entry = archive.GetEntry(entryName);
+                if (entry == null)
+                    throw new InvalidDataException($"NPZ 缺少必需条目：{entryName}");
+
+                if (entry.Length <= 0)
+                    throw new InvalidDataException($"NPZ 条目为空：{entryName}");
+            }
+
+            logger?.Invoke($"[NPZ] 最小结构校验通过：{npzPath}");
+        }
     }
 }

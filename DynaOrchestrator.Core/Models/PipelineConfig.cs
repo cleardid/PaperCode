@@ -26,5 +26,15 @@ namespace DynaOrchestrator.Core.Models
         /// 阶段 3：是否执行 C++ 引擎图提取与 NPZ 序列化
         /// </summary>
         public bool EnablePostProcessing { get; set; } = true;
+
+        /// <summary>
+        /// 是否在成功生成 NPZ 文件后清理大型求解文件
+        /// </summary>
+        public bool CleanupLargeSolverFilesAfterSuccessfulNpz { get; set; } = true;
+
+        public string[] SolverCleanupGlobs { get; set; } = new[]
+        {
+            "d3plot*"
+        };
     }
 }

@@ -8,6 +8,8 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace DynaOrchestrator.Core
 {
@@ -248,6 +250,16 @@ namespace DynaOrchestrator.Core
 
                     // 将 Span 数据通过 MemoryMarshal 映射为 byte 后直接写入磁盘压缩流
                     NpzWriter.Save(config.NpzOutputFile, rowsSpan, colsSpan, weightsSpan, featuresSpan, attrsSpan, labels.PeakOverpressure, labels.ArrivalTime, labels.PositiveImpulse, labels.PositiveDuration, nearWallFlag, nearEdgeFlag, nearCornerFlag, samplingRegionId, caseCond, data.num_nodes, data.time_steps, data.feature_dim, data.attr_dim, logger);
+
+                    logger?.Invoke("[后处理] NPZ 写出完成。");
+
+                    NpzWriter.ValidateBasicStructure(config.NpzOutputFile, logger);
+
+                    CleanupLargeSolverOutputsAfterSuccessfulNpz(
+                        config: config,
+                        trhistPathToKeep: actualTrhistPath,
+                        kFilePathToKeep: config.OutputKFile,
+                        logger: logger);
                 }
             }
             finally
@@ -353,6 +365,99 @@ namespace DynaOrchestrator.Core
             {
                 if (float.IsNaN(values[i]) || float.IsInfinity(values[i])) throw new InvalidOperationException($"{name}[{i}] 存在 NaN或Inf等无效数值");
             }
+        }
+
+        private static void CleanupLargeSolverOutputsAfterSuccessfulNpz(
+    PipelineConfig config,
+    string trhistPathToKeep,
+    string kFilePathToKeep,
+    Action<string>? logger)
+        {
+            if (!config.CleanupLargeSolverFilesAfterSuccessfulNpz)
+            {
+                logger?.Invoke("[Cleanup] 已关闭大文件自动清理。");
+                return;
+            }
+
+            string workDir = Path.GetDirectoryName(Path.GetFullPath(kFilePathToKeep))
+                             ?? throw new InvalidOperationException("无法确定求解结果目录。");
+
+            if (!Directory.Exists(workDir))
+            {
+                logger?.Invoke($"[Cleanup] 结果目录不存在，跳过清理：{workDir}");
+                return;
+            }
+
+            var keepSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                Path.GetFullPath(trhistPathToKeep),
+                Path.GetFullPath(kFilePathToKeep)
+            };
+
+            int deletedCount = 0;
+            long deletedBytes = 0;
+
+            foreach (string pattern in config.SolverCleanupGlobs ?? Array.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(pattern))
+                    continue;
+
+                IEnumerable<string> matchedFiles;
+                try
+                {
+                    matchedFiles = Directory.EnumerateFiles(workDir, pattern, SearchOption.TopDirectoryOnly);
+                }
+                catch (Exception ex)
+                {
+                    logger?.Invoke($"[Cleanup][Warning] 枚举文件失败，Pattern={pattern}, Dir={workDir}, Error={ex.Message}");
+                    continue;
+                }
+
+                foreach (string file in matchedFiles)
+                {
+                    string fullPath = Path.GetFullPath(file);
+
+                    if (keepSet.Contains(fullPath))
+                    {
+                        logger?.Invoke($"[Cleanup] 保留文件：{Path.GetFileName(fullPath)}");
+                        continue;
+                    }
+
+                    try
+                    {
+                        var fi = new FileInfo(fullPath);
+                        long size = fi.Exists ? fi.Length : 0;
+
+                        File.Delete(fullPath);
+
+                        deletedCount++;
+                        deletedBytes += size;
+
+                        logger?.Invoke($"[Cleanup] 已删除：{fi.Name} ({FormatBytes(size)})");
+                    }
+                    catch (Exception ex)
+                    {
+                        logger?.Invoke($"[Cleanup][Warning] 删除失败：{fullPath}，Error={ex.Message}");
+                    }
+                }
+            }
+
+            logger?.Invoke($"[Cleanup] 清理完成，共删除 {deletedCount} 个文件，释放 {FormatBytes(deletedBytes)}。");
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            string[] units = { "B", "KB", "MB", "GB", "TB" };
+            double size = bytes;
+            int unit = 0;
+
+            while (size >= 1024 && unit < units.Length - 1)
+            {
+                size /= 1024;
+                unit++;
+            }
+
+            return $"{size:0.##} {units[unit]}";
         }
     }
 }

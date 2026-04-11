@@ -1,33 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-
-    <Platforms>x64</Platforms>
-    <PlatformTarget>x64</PlatformTarget>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\DynaOrchestrator.Core\DynaOrchestrator.Core.csproj" />
   </ItemGroup>
 
-  <Target Name="CopyNativeDllToOutput" AfterTargets="Build">
-    <Copy
-      SourceFiles="$(TargetDir)DynaOrchestrator.Native.dll"
-      DestinationFolder="$(TargetDir)"
-      SkipUnchangedFiles="true"
-      Condition="Exists('$(TargetDir)DynaOrchestrator.Native.dll')" />
-  </Target>
-
-  <Target Name="CopyNativeDllToPublishDir" AfterTargets="Publish">
-    <Copy
-      SourceFiles="$(TargetDir)DynaOrchestrator.Native.dll"
-      DestinationFolder="$(PublishDir)"
-      SkipUnchangedFiles="true"
-      Condition="Exists('$(TargetDir)DynaOrchestrator.Native.dll')" />
-  </Target>
 </Project>
