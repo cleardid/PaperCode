@@ -79,6 +79,16 @@ namespace DynaOrchestrator.Core.Batch
                 if (row == null)
                     throw new Exception($"CSV 中未找到待更新 CaseId: {caseId}");
 
+                string oldCompleted = GetCell(row, completedIndex);
+                string oldStatus = GetCell(row, statusIndex);
+
+                bool changed =
+                    !string.Equals(oldCompleted, completed, StringComparison.Ordinal) ||
+                    !string.Equals(oldStatus, status, StringComparison.Ordinal);
+
+                if (!changed)
+                    return;
+
                 SetCell(row, completedIndex, completed);
                 SetCell(row, statusIndex, status);
                 SetCell(row, lastRunTimeIndex, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
@@ -92,7 +102,7 @@ namespace DynaOrchestrator.Core.Batch
             if (!File.Exists(csvPath))
                 throw new FileNotFoundException($"未找到 CSV 文件: {csvPath}");
 
-            var lines = File.ReadAllLines(csvPath);
+            var lines = File.ReadAllLines(csvPath, Encoding.UTF8);
             if (lines.Length == 0)
                 throw new Exception("CSV 文件为空。");
 

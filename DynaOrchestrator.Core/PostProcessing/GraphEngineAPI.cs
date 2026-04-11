@@ -48,6 +48,30 @@ namespace DynaOrchestrator.Core.PostProcessing
             // 将函数指针传递给 C++
             SetLogCallback(_logCallbackInstance);
         }
+
+        /// <summary>
+        /// 检查 Native 引擎是否可用
+        /// </summary>
+        /// <exception cref="DllNotFoundException"></exception>
+        public static void EnsureAvailable()
+        {
+            if (NativeLibrary.TryLoad(DllName, out var handle))
+            {
+                NativeLibrary.Free(handle);
+                return;
+            }
+
+            string explicitPath = Path.Combine(AppContext.BaseDirectory, DllName);
+            if (NativeLibrary.TryLoad(explicitPath, out handle))
+            {
+                NativeLibrary.Free(handle);
+                return;
+            }
+
+            throw new DllNotFoundException(
+                $"系统缺失核心计算引擎组件：未找到 C++ 动态链接库，无法加载 Native 引擎：{DllName}。请确认已构建并随程序一起部署。");
+        }
+
         // =======================================================
 
         /// <summary>

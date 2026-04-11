@@ -155,8 +155,11 @@ namespace DynaOrchestrator.Core.Batch
             if (record.L <= 0 || record.W <= 0 || record.H <= 0)
                 throw new Exception($"第 {lineNumber} 行房间尺寸必须大于 0。");
 
-            if (record.ChargeMass <= 0)
-                throw new Exception($"第 {lineNumber} 行 ChargeMass 必须大于 0。");
+            if (record.ChargeDensity <= 0 || !double.IsFinite(record.ChargeDensity))
+                throw new Exception($"第 {lineNumber} 行 ChargeDensity 必须为有限正数。");
+
+            if (!double.IsFinite(record.L) || !double.IsFinite(record.W) || !double.IsFinite(record.H))
+                throw new Exception($"第 {lineNumber} 行房间尺寸存在非有限值。");
 
             double roomLmm = record.L * 1000.0;
             double roomWmm = record.W * 1000.0;

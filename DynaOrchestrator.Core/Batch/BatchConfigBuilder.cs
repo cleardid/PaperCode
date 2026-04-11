@@ -96,7 +96,18 @@ namespace DynaOrchestrator.Core.Batch
         /// <returns>半径，单位 mm</returns>
         private static double CalculateRadiusMm(double chargeMass, double chargeDensity)
         {
-            return Math.Pow(3 * chargeMass / (4 * Math.PI * chargeDensity), 1.0 / 3) * 1000;
+            if (!double.IsFinite(chargeMass) || chargeMass <= 0)
+                throw new ArgumentOutOfRangeException(nameof(chargeMass), "chargeMass 必须为有限正数。");
+
+            if (!double.IsFinite(chargeDensity) || chargeDensity <= 0)
+                throw new ArgumentOutOfRangeException(nameof(chargeDensity), "chargeDensity 必须为有限正数。");
+
+            double radiusMm = Math.Pow(3 * chargeMass / (4 * Math.PI * chargeDensity), 1.0 / 3) * 1000.0;
+
+            if (!double.IsFinite(radiusMm) || radiusMm <= 0)
+                throw new InvalidOperationException("根据装药质量和密度计算得到的半径无效。");
+
+            return radiusMm;
         }
 
         /// <summary>

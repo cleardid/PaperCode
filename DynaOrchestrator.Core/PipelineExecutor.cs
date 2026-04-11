@@ -22,7 +22,7 @@ namespace DynaOrchestrator.Core
         /// <summary>
         /// 用于隔离 C++ 端 OpenMP 的多线程全核加速，防止与 C# 端的并发任务发生线程冲突
         /// </summary>
-        private static readonly object _postProcessLock = new object();
+        private static readonly SemaphoreSlim _postProcessGate = new(1, 1);
 
         /// <summary>
         /// 执行单个工况的完整流程。
@@ -62,6 +62,8 @@ namespace DynaOrchestrator.Core
                 {
                     throw new FileNotFoundException($"系统缺失核心计算引擎组件：未找到 C++ 动态链接库 ({dllPath})。请确保 Native 项目已编译且输出至该目录。");
                 }
+
+                GraphEngineAPI.EnsureAvailable();
             }
 
             // 如果跳过了第一阶段（前处理）
@@ -121,11 +123,16 @@ namespace DynaOrchestrator.Core
                 logger?.Invoke("\n[Phase 3] 准备进行图特征提取...");
                 logger?.Invoke("[排队] 正在等待全局 C++ 引擎锁，以防 OpenMP 线程冲突...");
 
-                // 全局排队：确保同一时刻只有一个工况在调用 C++ DLL 进行特征转储
-                lock (_postProcessLock)
+                _postProcessGate.Wait(cancellationToken);
+                try
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     logger?.Invoke("[获得锁] 开始执行非托管图提取与数据集生成...");
                     RunPostProcessing(config, exp, other, record, actualTrhistPath, logger);
+                }
+                finally
+                {
+                    _postProcessGate.Release();
                 }
             }
             else

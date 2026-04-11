@@ -20,7 +20,10 @@ namespace DynaOrchestrator.Core.Solver
             CancellationToken cancellationToken = default,
             Action<string>? logger = null)
         {
-            bool isNormalTermination = false;
+            int normalTerminationFlag = 0;
+            using var stdoutClosed = new ManualResetEventSlim(false);
+            using var stderrClosed = new ManualResetEventSlim(false);
+
             Process? process = null;
             CancellationTokenRegistration ctr = default;
 
@@ -67,25 +70,49 @@ namespace DynaOrchestrator.Core.Solver
 
                 process.OutputDataReceived += (s, e) =>
                 {
-                    if (!string.IsNullOrEmpty(e.Data))
+                    if (e.Data == null)
                     {
-                        logger?.Invoke($"[DYNA] {e.Data}");
-                        if (e.Data.Contains("N o r m a l    t e r m i n a t i o n") ||
-                            e.Data.Contains("Normal termination"))
-                        {
-                            isNormalTermination = true;
-                        }
+                        stdoutClosed.Set();
+                        return;
+                    }
+
+                    logger?.Invoke($"[DYNA] {e.Data}");
+
+                    if (e.Data.Contains("N o r m a l    t e r m i n a t i o n", StringComparison.OrdinalIgnoreCase) ||
+                        e.Data.Contains("Normal termination", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Interlocked.Exchange(ref normalTerminationFlag, 1);
                     }
                 };
 
                 process.ErrorDataReceived += (s, e) =>
                 {
-                    if (!string.IsNullOrEmpty(e.Data))
-                        logger?.Invoke($"[DYNA ERR] {e.Data}");
+                    if (e.Data == null)
+                    {
+                        stderrClosed.Set();
+                        return;
+                    }
+
+                    logger?.Invoke($"[DYNA ERR] {e.Data}");
                 };
 
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
+
+                process.WaitForExit();
+                stdoutClosed.Wait(cancellationToken);
+                stderrClosed.Wait(cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                logger?.Invoke($"[DYNA] 进程退出，ExitCode={process.ExitCode}");
+
+                bool isNormalTermination = Volatile.Read(ref normalTerminationFlag) == 1;
+                if (process.ExitCode != 0 || !isNormalTermination)
+                {
+                    logger?.Invoke("[Warning] LS-DYNA 未被可靠判定为正常结束。");
+                    return false;
+                }
 
                 // 一旦收到取消请求，立即杀死该求解器进程树
                 if (cancellationToken.CanBeCanceled)

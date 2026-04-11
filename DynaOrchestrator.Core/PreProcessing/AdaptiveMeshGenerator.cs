@@ -168,9 +168,9 @@ namespace DynaOrchestrator.Core.PreProcessing
                     }
 
                     // LS-DYNA *NODE 格式: nid(8), x(16), y(16), z(16)
-                    if (double.TryParse(line.Substring(8, 16), out double x) &&
-                        double.TryParse(line.Substring(24, 16), out double y) &&
-                        double.TryParse(line.Substring(40, 16), out double z))
+                    if (double.TryParse(line.Substring(8, 16), NumberStyles.Float | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out double x) &&
+                        double.TryParse(line.Substring(24, 16), NumberStyles.Float | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out double y) &&
+                        double.TryParse(line.Substring(40, 16), NumberStyles.Float | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out double z))
                     {
                         box.Expand(x * scale, y * scale, z * scale);
                     }

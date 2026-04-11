@@ -117,15 +117,16 @@ namespace DynaOrchestrator.Core.Batch
                 throw new ArgumentNullException(nameof(record));
 
             BatchRoot = Path.GetFullPath(batchRoot);
-            DatasetStage = record.DatasetStage;
-            CaseId = record.CaseId;
+            DatasetStage = ValidatePathSegment(record.DatasetStage, nameof(record.DatasetStage));
+            CaseId = ValidatePathSegment(record.CaseId, nameof(record.CaseId));
+            string baseModelKey = ValidatePathSegment(record.BaseModelKey, nameof(record.GeomType));
 
-            BaseModelDir = Path.Combine(BatchRoot, "base_models", record.BaseModelKey);
+            BaseModelDir = CombineUnderRoot(BatchRoot, "base_models", baseModelKey);
+            // runs/<DatasetStage>/<CaseId>/
+            CaseRootDir = CombineUnderRoot(BatchRoot, "runs", DatasetStage, CaseId);
+
             SourceBaseKFile = Path.Combine(BaseModelDir, "base.k");
             SourceStlFile = Path.Combine(BaseModelDir, "room.stl");
-
-            // runs/<DatasetStage>/<CaseId>/
-            CaseRootDir = Path.Combine(BatchRoot, "runs", DatasetStage, CaseId);
 
             InputDir = Path.Combine(CaseRootDir, "input");
             RunDir = Path.Combine(CaseRootDir, "run");
@@ -164,6 +165,47 @@ namespace DynaOrchestrator.Core.Batch
 
             if (!File.Exists(SourceStlFile))
                 throw new FileNotFoundException($"未找到基础 STL 文件: {SourceStlFile}");
+        }
+
+        /// <summary>
+        /// 验证路径段。
+        /// </summary>
+        /// <param name="value"></param>
+        /// <param name="name"></param>
+        /// <returns></returns>
+        /// <exception cref="ArgumentException"></exception>
+        private static string ValidatePathSegment(string value, string name)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException($"{name} 不能为空。", name);
+
+            value = value.Trim();
+
+            if (Path.IsPathRooted(value) ||
+                value.Contains("..", StringComparison.Ordinal) ||
+                value.Contains(Path.DirectorySeparatorChar) ||
+                value.Contains(Path.AltDirectorySeparatorChar))
+            {
+                throw new ArgumentException($"{name} 不能包含路径跳转或分隔符：{value}", name);
+            }
+
+            if (value.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                throw new ArgumentException($"{name} 包含非法字符：{value}", name);
+
+            return value;
+        }
+
+        private static string CombineUnderRoot(string root, params string[] parts)
+        {
+            string full = Path.GetFullPath(Path.Combine(new[] { root }.Concat(parts).ToArray()));
+            string normalizedRoot = Path.GetFullPath(root)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+
+            if (!full.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"路径越界：{full}");
+
+            return full;
         }
 
         /// <summary>

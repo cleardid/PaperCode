@@ -421,6 +421,15 @@ namespace DynaOrchestrator.Core.Batch
 
         private static void RecreateCaseDirectory(BatchCasePaths paths)
         {
+            string allowedRoot = Path.GetFullPath(Path.Combine(paths.BatchRoot, "runs"))
+                + Path.DirectorySeparatorChar;
+            string target = Path.GetFullPath(paths.CaseRootDir)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+
+            if (!target.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"拒绝删除越界目录：{paths.CaseRootDir}");
+
             if (Directory.Exists(paths.CaseRootDir))
                 Directory.Delete(paths.CaseRootDir, recursive: true);
 
