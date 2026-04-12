@@ -130,12 +130,17 @@ namespace DynaOrchestrator.Desktop.ViewModels
         public RelayCommand StartCommand { get; }
         public RelayCommand StopCommand { get; }
         public RelayCommand LoadCsvCommand { get; }
+        public RelayCommand SelectAllCommand { get; }
+        public RelayCommand DeselectAllCommand { get; }
 
         public MainViewModel()
         {
             StartCommand = new RelayCommand(StartBatch, () => !IsRunning && Cases.Count > 0);
             StopCommand = new RelayCommand(StopBatch, () => IsRunning);
             LoadCsvCommand = new RelayCommand(LoadCsv, () => !IsRunning);
+
+            SelectAllCommand = new RelayCommand(() => SetAllSelection(true), () => !IsRunning && Cases.Count > 0);
+            DeselectAllCommand = new RelayCommand(() => SetAllSelection(false), () => !IsRunning && Cases.Count > 0);
 
             // 构造函数中优先加载全局配置
             LoadBaseConfig();
@@ -492,6 +497,17 @@ namespace DynaOrchestrator.Desktop.ViewModels
         protected virtual void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        /// <summary>
+        /// 批量设置工况的勾选状态
+        /// </summary>
+        private void SetAllSelection(bool isSelected)
+        {
+            foreach (var record in Cases)
+            {
+                record.IsSelected = isSelected;
+            }
         }
     }
 }

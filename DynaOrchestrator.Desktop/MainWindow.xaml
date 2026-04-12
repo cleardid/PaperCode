@@ -1,7 +1,7 @@
 ﻿<Window x:Class="DynaOrchestrator.Desktop.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DynaOrchestrator 控制台" Height="700" Width="1100">
+        Title="DynaOrchestrator 控制台" Height="800" Width="1200">
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -29,6 +29,8 @@
 
                 <StackPanel Orientation="Horizontal">
                     <Button Content="加载 CSV 列表" Command="{Binding LoadCsvCommand}" Width="120" Margin="0,0,20,0"/>
+                    <Button Content="全选" Command="{Binding SelectAllCommand}" Width="60" Margin="0,0,5,0"/>
+                    <Button Content="取消全选" Command="{Binding DeselectAllCommand}" Width="80" Margin="0,0,20,0"/>
 
                     <TextBlock Text="最大并发 Case 数:" VerticalAlignment="Center" Margin="0,0,5,0"/>
                     <TextBox Text="{Binding MaxParallelCases, UpdateSourceTrigger=PropertyChanged}" Width="50" VerticalContentAlignment="Center" Margin="0,0,20,0"/>
@@ -48,7 +50,15 @@
         <DataGrid Grid.Row="1" ItemsSource="{Binding Cases}" AutoGenerateColumns="False" 
                   CanUserAddRows="False" IsReadOnly="True" HeadersVisibility="Column" AlternatingRowBackground="#F5F5F5">
             <DataGrid.Columns>
-                <DataGridCheckBoxColumn Header="选择" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="40"/>
+                <DataGridTemplateColumn Header="选择" Width="50">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" 
+                      HorizontalAlignment="Center" 
+                      VerticalAlignment="Center"/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
 
                 <DataGridTextColumn Header="序号" Binding="{Binding Index}" IsReadOnly="True" Width="40"/>
                 <DataGridTextColumn Header="Case ID" Binding="{Binding CaseId}" Width="140"/>
