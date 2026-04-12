@@ -98,6 +98,23 @@ namespace DynaOrchestrator.Core.Batch
             set { if (_lastRunTime != value) { _lastRunTime = value; OnPropertyChanged(); } }
         }
 
+        private bool _isSelected = true; // 默认勾选
+        /// <summary>
+        /// 选择状态
+        /// </summary>
+        public bool IsSelected
+        {
+            get => _isSelected;
+            set { if (_isSelected != value) { _isSelected = value; OnPropertyChanged(); } }
+        }
+
+        private int _index;
+        public int Index
+        {
+            get => _index;
+            set { if (_index != value) { _index = value; OnPropertyChanged(); } }
+        }
+
         /// <summary>
         /// 是否已经完成
         /// </summary>

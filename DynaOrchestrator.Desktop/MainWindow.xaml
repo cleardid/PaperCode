@@ -48,6 +48,9 @@
         <DataGrid Grid.Row="1" ItemsSource="{Binding Cases}" AutoGenerateColumns="False" 
                   CanUserAddRows="False" IsReadOnly="True" HeadersVisibility="Column" AlternatingRowBackground="#F5F5F5">
             <DataGrid.Columns>
+                <DataGridCheckBoxColumn Header="选择" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="40"/>
+
+                <DataGridTextColumn Header="序号" Binding="{Binding Index}" IsReadOnly="True" Width="40"/>
                 <DataGridTextColumn Header="Case ID" Binding="{Binding CaseId}" Width="140"/>
                 <DataGridTextColumn Header="几何模型" Binding="{Binding GeomType}" Width="70"/>
 

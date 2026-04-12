@@ -225,8 +225,11 @@ namespace DynaOrchestrator.Desktop.ViewModels
 
                 var records = CaseCsvReader.Read(fullCsvPath);
                 Cases.Clear();
+
+                int i = 1;
                 foreach (var r in records)
                 {
+                    r.Index = i++; // 分配序号
                     // --- 状态重置逻辑 ---
                     // 1. 如果上次退出时任务显示为 Running，说明执行被非正常中断，需重置为 Pending
                     // 2. 如果任务状态为 Failed，通常需要重新跑，也重置为 Pending
@@ -396,7 +399,13 @@ namespace DynaOrchestrator.Desktop.ViewModels
                 string workspaceRoot = Path.GetFullPath(Path.Combine(baseDir, WorkspaceRootDir));
                 string fullCsvPath = Path.GetFullPath(Path.Combine(workspaceRoot, CasesCsvPath));
 
-                var recordList = new List<BatchCaseRecord>(Cases);
+                var recordList = Cases.Where(r => r.IsSelected).ToList();
+
+                if (recordList.Count == 0)
+                {
+                    AppendLog("[Warning] 未勾选任何任务，请先在列表中挑选任务。");
+                    return;
+                }
 
                 // 【修改说明】：适配 AsyncLogBuffer 的新签名 Action<List<string>>
                 using var logBuffer = new AsyncLogBuffer(batchMessages =>
