@@ -361,7 +361,7 @@ namespace DynaOrchestrator.Desktop.ViewModels
                 return;
             }
 
-            // --- 新增：启动前弹框确认 ---
+            // 启动前弹框确认
             if (!ConfirmBatchStart(normalizedMemoryPerCase))
             {
                 AppendLog("[UI] 用户取消了本次批处理启动。");
@@ -398,11 +398,30 @@ namespace DynaOrchestrator.Desktop.ViewModels
 
                 var recordList = new List<BatchCaseRecord>(Cases);
 
-                using var logBuffer = new AsyncLogBuffer(mergedMessages =>
+                // 【修改说明】：适配 AsyncLogBuffer 的新签名 Action<List<string>>
+                using var logBuffer = new AsyncLogBuffer(batchMessages =>
                 {
                     Application.Current.Dispatcher.InvokeAsync(() =>
                     {
-                        AppendLog(mergedMessages);
+                        // 1. 遍历批量传递过来的日志，作为独立记录插入 ObservableCollection
+                        // 此时 WPF 绑定的 ListBox 会将它们渲染为独立的 Item，ScrollIntoView 将正常工作
+                        foreach (var msg in batchMessages)
+                        {
+                            AppendLog(msg);
+                        }
+
+                        // 2. 【新增保护机制】：日志行数截断 (防 OOM 与 UI 假死)
+                        // 当批处理运行成百上千个工况时，无限增长的 UI 元素会导致内存溢出。
+                        const int MaxLogLines = 5000;
+                        if (Logs.Count > MaxLogLines)
+                        {
+                            // 批量移除顶部的旧日志，保持最新的 5000 行可见
+                            int removeCount = Logs.Count - MaxLogLines;
+                            for (int i = 0; i < removeCount; i++)
+                            {
+                                Logs.RemoveAt(0);
+                            }
+                        }
                     }, System.Windows.Threading.DispatcherPriority.Background);
                 }, flushIntervalMs: 200);
 

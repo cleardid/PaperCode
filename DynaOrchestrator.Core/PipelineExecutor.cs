@@ -368,10 +368,10 @@ namespace DynaOrchestrator.Core
         }
 
         private static void CleanupLargeSolverOutputsAfterSuccessfulNpz(
-    PipelineConfig config,
-    string trhistPathToKeep,
-    string kFilePathToKeep,
-    Action<string>? logger)
+        PipelineConfig config,
+        string trhistPathToKeep,
+        string kFilePathToKeep,
+        Action<string>? logger)
         {
             if (!config.CleanupLargeSolverFilesAfterSuccessfulNpz)
             {

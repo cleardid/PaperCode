@@ -34,7 +34,8 @@ namespace DynaOrchestrator.Core.Models
 
         public string[] SolverCleanupGlobs { get; set; } = new[]
         {
-            "d3plot*"
+            "d3plot*",
+            "d3dump*"
         };
     }
 }

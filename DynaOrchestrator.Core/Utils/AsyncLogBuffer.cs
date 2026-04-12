@@ -1,15 +1,22 @@
 ﻿using System.Collections.Concurrent;
-using System.Text;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace DynaOrchestrator.Core.Utils
 {
     /// <summary>
-    /// 异步日志缓冲器：防止高频日志爆发式输出导致 WPF UI 线程假死
+    /// 异步日志缓冲器：防止高频日志爆发式输出导致 WPF UI 线程假死。
+    /// [渲染优化版]：将日志作为独立集合抛出，修复单条超大文本导致的滚动条失效与渲染卡顿。
     /// </summary>
     public class AsyncLogBuffer : IAsyncDisposable, IDisposable
     {
         private readonly ConcurrentQueue<string> _queue = new();
-        private readonly Action<string> _uiUpdateAction;
+
+        // 【修改说明】：回调签名从 Action<string> 改为 Action<List<string>>
+        // 目的：让 UI 层能够遍历集合，逐条插入 ListBox，从而保证 ScrollIntoView 精准定位到最后一行。
+        private readonly Action<List<string>> _uiUpdateAction;
+
         private readonly int _flushIntervalMs;
         private readonly CancellationTokenSource _cts = new();
         private Task? _flushTask;
@@ -17,9 +24,9 @@ namespace DynaOrchestrator.Core.Utils
         /// <summary>
         /// 构造函数
         /// </summary>
-        /// <param name="uiUpdateAction">UI 线程的实际写入操作 (如 TextBox.AppendText)</param>
+        /// <param name="uiUpdateAction">UI 线程的实际写入操作 (接收批量日志列表)</param>
         /// <param name="flushIntervalMs">刷新间隔 (毫秒)，默认 200ms</param>
-        public AsyncLogBuffer(Action<string> uiUpdateAction, int flushIntervalMs = 200)
+        public AsyncLogBuffer(Action<List<string>> uiUpdateAction, int flushIntervalMs = 200)
         {
             _uiUpdateAction = uiUpdateAction ?? throw new ArgumentNullException(nameof(uiUpdateAction));
             _flushIntervalMs = flushIntervalMs;
@@ -53,23 +60,25 @@ namespace DynaOrchestrator.Core.Utils
         }
 
         /// <summary>
-        /// 立即将队列中的日志合并并推送到 UI
+        /// 立即将队列中的日志提取并推送到 UI
         /// </summary>
         public void FlushNow()
         {
             if (_queue.IsEmpty) return;
 
-            var sb = new StringBuilder();
+            // 【修改说明】：放弃使用 StringBuilder 拼接单行文本，改为使用 List 收集本轮所有日志。
+            var batchMessages = new List<string>();
+
             // 批量出队
             while (_queue.TryDequeue(out var msg))
             {
-                sb.AppendLine(msg);
+                batchMessages.Add(msg);
             }
 
-            if (sb.Length > 0)
+            if (batchMessages.Count > 0)
             {
-                // 触发 UI 更新委托（注意：外部的 _uiUpdateAction 需要包含 Dispatcher.Invoke 逻辑）
-                _uiUpdateAction(sb.ToString().TrimEnd('\r', '\n'));
+                // 触发 UI 更新委托，将集合整体抛出
+                _uiUpdateAction(batchMessages);
             }
         }
 
