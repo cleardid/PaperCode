@@ -25,10 +25,10 @@ namespace DynaOrchestrator.Core.PostProcessing
         private const string DllName = "DynaOrchestrator.Native.dll";
 
         // ================= 新增：日志回调机制 =================
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-        public delegate void LogCallbackDelegate([MarshalAs(UnmanagedType.LPStr)] string message);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        public delegate void LogCallbackDelegate(IntPtr messagePtr);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         public static extern void SetLogCallback(LogCallbackDelegate callback);
 
         // 必须使用静态变量持有委托，防止被 .NET 垃圾回收器(GC)回收，导致 C++ 访问空指针闪退
@@ -38,14 +38,12 @@ namespace DynaOrchestrator.Core.PostProcessing
         {
             if (wpfLogger == null) return;
 
-            // 实例化委托并保存在静态变量中
-            _logCallbackInstance = new LogCallbackDelegate(msg =>
+            _logCallbackInstance = new LogCallbackDelegate(messagePtr =>
             {
-                // 为 C++ 日志加上专门的前缀，并抛给上层 UI
-                wpfLogger.Invoke($"[C++ Engine] {msg}");
+                string msg = Marshal.PtrToStringAnsi(messagePtr) ?? string.Empty;
+                wpfLogger($"[C++ Engine] {msg}");
             });
 
-            // 将函数指针传递给 C++
             SetLogCallback(_logCallbackInstance);
         }
 

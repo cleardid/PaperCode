@@ -11,11 +11,10 @@
 #define EXPORT_API __attribute__((visibility("default")))
 #endif
 
-// 1. 定义 stdcall 格式的回调指针
-typedef void(__stdcall* LogCallback)(const char* message);
-
+// 1. 定义 __cdecl 格式的回调指针
+using LogCallback = void(__cdecl*)(const char* message);
 // 2. 导出回调注册接口
-extern "C" EXPORT_API void SetLogCallback(LogCallback callback);
+extern "C" EXPORT_API void __cdecl SetLogCallback(LogCallback callback);
 
 // 内部派发函数
 void DispatchLog(const std::string& message);

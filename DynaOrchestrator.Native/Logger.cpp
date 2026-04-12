@@ -9,7 +9,7 @@ namespace
 
 LogCallback g_Logger = nullptr;
 
-extern "C" EXPORT_API void SetLogCallback(LogCallback callback)
+extern "C" EXPORT_API void __cdecl SetLogCallback(LogCallback callback)
 {
 	std::lock_guard<std::mutex> lock(g_LogMutex);
 	g_Logger = callback;
