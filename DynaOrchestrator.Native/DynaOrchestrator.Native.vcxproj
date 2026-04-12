@@ -60,10 +60,10 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(SolutionDir)DynaOrchestrator.Desktop\bin\$(Configuration)\net8.0-windows\</OutDir>
+    <OutDir>$(SolutionDir)DynaOrchestrator.Desktop\bin\$(Platform)\$(Configuration)\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(SolutionDir)DynaOrchestrator.Desktop\bin\$(Configuration)\net8.0-windows\</OutDir>
+    <OutDir>$(SolutionDir)DynaOrchestrator.Desktop\bin\$(Platform)\$(Configuration)\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -92,6 +92,7 @@
       <PrecompiledHeaderFile>
       </PrecompiledHeaderFile>
       <OpenMPSupport>true</OpenMPSupport>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

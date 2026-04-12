@@ -24,53 +24,46 @@ namespace DynaOrchestrator.Core.PostProcessing
     {
         private const string DllName = "DynaOrchestrator.Native.dll";
 
-        // ================= 新增：日志回调机制 =================
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         public delegate void LogCallbackDelegate(IntPtr messagePtr);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-        public static extern void SetLogCallback(LogCallbackDelegate callback);
+        public static extern void SetLogCallback(LogCallbackDelegate? callback);
 
-        // 必须使用静态变量持有委托，防止被 .NET 垃圾回收器(GC)回收，导致 C++ 访问空指针闪退
-        private static LogCallbackDelegate? _logCallbackInstance;
+        // 核心修复 1：必须使用静态变量持有当前委托，防止执行期间被 .NET GC 回收
+        private static LogCallbackDelegate? _currentLogCallback;
 
         public static void InitializeLogger(Action<string>? wpfLogger)
         {
-            if (wpfLogger == null) return;
+            if (wpfLogger == null)
+            {
+                SetLogCallback(null);
+                _currentLogCallback = null;
+                return;
+            }
 
-            _logCallbackInstance = new LogCallbackDelegate(messagePtr =>
+            // 核心修复 2：每次工况执行时赋予新的委托（以更新 CaseId 前缀），
+            // 并覆盖静态变量。因为外部有 _postProcessGate 锁保证单线程执行，所以是线程安全的。
+            _currentLogCallback = new LogCallbackDelegate(messagePtr =>
             {
                 string msg = Marshal.PtrToStringAnsi(messagePtr) ?? string.Empty;
                 wpfLogger($"[C++ Engine] {msg}");
             });
 
-            SetLogCallback(_logCallbackInstance);
+            SetLogCallback(_currentLogCallback);
         }
 
-        /// <summary>
-        /// 检查 Native 引擎是否可用
-        /// </summary>
-        /// <exception cref="DllNotFoundException"></exception>
         public static void EnsureAvailable()
         {
-            if (NativeLibrary.TryLoad(DllName, out var handle))
-            {
-                NativeLibrary.Free(handle);
-                return;
-            }
-
+            // 核心修复 3：彻底删除所有 NativeLibrary.TryLoad 和 NativeLibrary.Free 逻辑。
+            // 仅进行文件存在性检查，将 DLL 的生命周期完全交由 .NET CLR 的 P/Invoke 底层管理，避免 OpenMP 崩溃。
             string explicitPath = Path.Combine(AppContext.BaseDirectory, DllName);
-            if (NativeLibrary.TryLoad(explicitPath, out handle))
+            if (!File.Exists(explicitPath))
             {
-                NativeLibrary.Free(handle);
-                return;
+                throw new DllNotFoundException(
+                    $"系统缺失核心计算引擎组件：未找到 C++ 动态链接库，无法加载 Native 引擎：{explicitPath}。请确认已构建并随程序一起部署。");
             }
-
-            throw new DllNotFoundException(
-                $"系统缺失核心计算引擎组件：未找到 C++ 动态链接库，无法加载 Native 引擎：{DllName}。请确认已构建并随程序一起部署。");
         }
-
-        // =======================================================
 
         /// <summary>
         /// 核心接口：生成图数据并返回指针
