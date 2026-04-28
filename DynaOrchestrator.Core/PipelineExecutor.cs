@@ -3,13 +3,8 @@ using DynaOrchestrator.Core.Models;
 using DynaOrchestrator.Core.PostProcessing;
 using DynaOrchestrator.Core.PreProcessing;
 using DynaOrchestrator.Core.Solver;
-using System;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Threading;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace DynaOrchestrator.Core
 {
@@ -215,9 +210,8 @@ namespace DynaOrchestrator.Core
                 GraphData data = Marshal.PtrToStructure<GraphData>(ptr);
                 ValidateGraphData(data); // 内存安全前置校验
 
-                // 【核心性能优化区】：启用 unsafe 指针包装
-                // 原逻辑使用 Marshal.Copy 会在 C# 托管堆分配等大的 float[]，导致内存翻倍。
-                // 现逻辑使用 ReadOnlySpan<T> 直接在 C++ 分配的非托管内存上进行视图包装，实现真正零拷贝。
+                // 启用 unsafe 指针包装
+                // 使用 ReadOnlySpan<T> 直接在 C++ 分配的非托管内存上进行视图包装，实现零拷贝。
                 unsafe
                 {
                     // 构建图拓扑 Span
@@ -237,6 +231,7 @@ namespace DynaOrchestrator.Core
                         actualTrhistPath, featuresSpan, data.num_nodes, data.time_steps, data.feature_dim, logger, 4, 1e-7f);
 
                     // 提取边界语义先验信息
+                    // 遍历所有节点，如果节点到墙/边/角的距离小于或等于 WallMargin 阈值，则将对应的标志位设置为 1.0f（True），否则设置为 0.0f（False）
                     float[] nearWallFlag = BuildBinarySemanticFlag(attrsSpan, data.num_nodes, data.attr_dim, 8, (float)other.WallMargin);
                     float[] nearEdgeFlag = BuildBinarySemanticFlag(attrsSpan, data.num_nodes, data.attr_dim, 9, (float)other.WallMargin);
                     float[] nearCornerFlag = BuildBinarySemanticFlag(attrsSpan, data.num_nodes, data.attr_dim, 10, (float)other.WallMargin);
@@ -245,7 +240,7 @@ namespace DynaOrchestrator.Core
                     // 生成该工况的宏观条件向量
                     float[] caseCond = BuildCaseConditionVector(record);
 
-                    // 序列化前执行 STGNS-v1 算法模型要求的对齐与合法性校验
+                    // 序列化前执行算法模型要求的对齐与合法性校验
                     ValidateStgnsV1Export(rowsSpan, colsSpan, weightsSpan, featuresSpan, attrsSpan, labels.PeakOverpressure, labels.ArrivalTime, labels.PositiveImpulse, labels.PositiveDuration, nearWallFlag, nearEdgeFlag, nearCornerFlag, samplingRegionId, caseCond, data.num_nodes, data.time_steps, data.feature_dim, data.attr_dim);
 
                     // 将 Span 数据通过 MemoryMarshal 映射为 byte 后直接写入磁盘压缩流
@@ -303,6 +298,8 @@ namespace DynaOrchestrator.Core
         }
 
         /// <summary>
+        /// 在物理几何中存在一个必然的重叠现象：一个靠近角落的节点，必然同时也靠近棱边和墙壁。
+        /// 如果直接将三个标志喂给神经网络，会产生语义冲突。
         /// 为各节点分配语义归属 ID，优先级：角区 > 棱边区 > 近壁区 > 内部流场。
         /// </summary>
         private static int[] BuildSamplingRegionId(float[] nearWallFlag, float[] nearEdgeFlag, float[] nearCornerFlag, int numNodes)

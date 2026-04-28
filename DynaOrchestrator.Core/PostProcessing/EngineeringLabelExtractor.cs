@@ -38,6 +38,7 @@ namespace DynaOrchestrator.Core.PostProcessing
             float[] positiveImpulse = new float[numNodes];
             float[] positiveDuration = new float[numNodes];
 
+            // 为到达时间赋初始值
             for (int i = 0; i < numNodes; i++)
                 tArrival[i] = -1.0f;
 

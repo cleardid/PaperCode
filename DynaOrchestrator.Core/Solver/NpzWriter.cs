@@ -37,26 +37,37 @@ namespace DynaOrchestrator.Core.Solver
             using (var archive = ZipFile.Open(path, ZipArchiveMode.Create))
             {
                 // 图拓扑
+                // 稀疏矩阵 COO 格式的行索引
                 WriteNpy(archive, "edge_index_row.npy", rows, new[] { rows.Length }, "<i4");
+                // 稀疏矩阵 COO 格式的列索引
                 WriteNpy(archive, "edge_index_col.npy", cols, new[] { cols.Length }, "<i4");
+                // 节点间的边权重
                 WriteNpy(archive, "edge_weight.npy", weights, new[] { weights.Length }, "<f4");
 
-                // 时空动态特征 (N, T, 5)
+                // 时空动态特征 三维张量，形状为 (N, T, 5)（N=节点数，T=时间步，5=特征维度）
                 WriteNpy(archive, "x.npy", features, new[] { num_nodes, time_steps, feature_dim }, "<f4");
 
-                // 静态物理属性 (N, 11)
+                // 静态物理属性 二维张量，形状为(N, 11)（N=节点数，11=静态属性维度）
                 WriteNpy(archive, "node_attr.npy", attrs, new[] { num_nodes, attr_dim }, "<f4");
 
                 // 工程响应标签 (N,)
+                // 全时程内的峰值超压
                 WriteNpy(archive, "p_max.npy", pMax, new[] { num_nodes }, "<f4");
+                // 冲击波首次到达该节点的时间
                 WriteNpy(archive, "t_arrival.npy", tArrival, new[] { num_nodes }, "<f4");
+                // 正压阶段的累计比冲（超压对时间的积分）
                 WriteNpy(archive, "positive_impulse.npy", positiveImpulse, new[] { num_nodes }, "<f4");
+                // 正压作用的持续时间
                 WriteNpy(archive, "positive_duration.npy", positiveDuration, new[] { num_nodes }, "<f4");
 
-                // 语义先验
+                // 语义分类标志 从 11 维特征中提取出来的二值化标志（0.0 或 1.0），用于告诉神经网络该节点是否靠近特殊几何结构
+                // 是否贴近墙壁
                 WriteNpy(archive, "near_wall_flag.npy", nearWallFlag, new[] { num_nodes }, "<f4");
+                // 是否贴近房间棱边
                 WriteNpy(archive, "near_edge_flag.npy", nearEdgeFlag, new[] { num_nodes }, "<f4");
+                // 是否贴近房间角落
                 WriteNpy(archive, "near_corner_flag.npy", nearCornerFlag, new[] { num_nodes }, "<f4");
+                // 一个整数数组（形状为 (N,)），用于直接标明节点所属的物理区域，优先级为：角区 (3) > 棱边区 (2) > 近壁区 (1) > 内部流场 (0)
                 WriteNpy(archive, "sampling_region_id.npy", samplingRegionId, new[] { num_nodes }, "<i4");
 
                 // case 级条件向量

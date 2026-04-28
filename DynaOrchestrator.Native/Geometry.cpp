@@ -37,7 +37,7 @@ bool EdgeTriangleAABBIntersect(const Point& p1, const Point& p2, const Triangle&
 	return true;
 }
 
-// Möller-Trumbore 射线-三角形求交算法
+// 2. Möller-Trumbore 射线-三角形求交算法
 bool RayIntersectsTriangle(const Point& ray_origin, const Point& ray_vector,
 	const Triangle& tri, float max_dist)
 {

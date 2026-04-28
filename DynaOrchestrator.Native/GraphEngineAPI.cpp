@@ -117,27 +117,6 @@ extern "C"
 			}
 
 			// 3. 构建并分配 C 风格返回结构 (使用 malloc/new 分配非托管内存)
-			// auto data = new GraphData();
-			// data->num_nodes = num_nodes;
-			// data->num_edges = static_cast<int>(rows.size());
-			// data->time_steps = time_steps;
-			// data->feature_dim = feature_dim;
-			//// 获取静态属性维度
-			// data->attr_dim = attr_dim;
-
-			// data->coo_rows = new int[data->num_edges];
-			// data->coo_cols = new int[data->num_edges];
-			// data->coo_weights = new float[data->num_edges];
-			// data->node_features = new float[num_nodes * time_steps * feature_dim];
-			// data->node_attrs = new float[num_nodes * data->attr_dim];
-
-			//// 4. 数据拷贝到展平的一维数组
-			// std::copy(rows.begin(), rows.end(), data->coo_rows);
-			// std::copy(cols.begin(), cols.end(), data->coo_cols);
-			// std::copy(weights.begin(), weights.end(), data->coo_weights);
-			// std::copy(node_features.begin(), node_features.end(), data->node_features);
-			// std::copy(node_attrs.begin(), node_attrs.end(), data->node_attrs);
-
 			size_t edge_count = rows.size();
 			size_t feature_count = static_cast<size_t>(num_nodes) * static_cast<size_t>(time_steps) * static_cast<size_t>(feature_dim);
 			size_t attr_count = static_cast<size_t>(num_nodes) * static_cast<size_t>(attr_dim);
@@ -155,6 +134,7 @@ extern "C"
 			data->node_features = feature_count ? new float[feature_count] : nullptr;
 			data->node_attrs = attr_count ? new float[attr_count] : nullptr;
 
+			// 4. 数据拷贝到展平的一维数组
 			PRINT_LOG << "[Debug] copy rows start" << std::endl;
 			if (edge_count)
 				std::copy(rows.begin(), rows.end(), data->coo_rows);

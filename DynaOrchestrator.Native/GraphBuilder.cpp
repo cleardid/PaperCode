@@ -18,13 +18,13 @@
 #include <iomanip>
 
 // 基于空间哈希的邻域搜索与图拓扑生成
-// 当前版本重点：
-// 1. 补 Rc / alpha / 网格尺寸 等输入合法性校验
-// 2. 补 mesh_accel 有效性校验
-// 3. 补 node.id 范围校验
-// 4. 把局部 COO 校验放到线程循环结束后
-// 5. 把最终输出 COO 校验放到 parallel 外
-// 6. 调试阶段先固定单线程，先排除并发因素
+// nodes - 包含节点 ID 和坐标的集合
+// stl_mesh - STL 模型数据，用于加速节点间距离计算
+// Rc - 空间哈希网格和邻域截断半径
+// alpha - 距离权重函数的参数
+// out_rows - 输出邻接矩阵的行索引
+// out_cols - 输出邻接矩阵的列索引
+// out_weights - 输出邻接矩阵的权重
 void BuildGraphWithHashing(const std::vector<Point>& nodes,
 	const std::vector<Triangle>& stl_mesh,
 	float Rc, float alpha,
@@ -72,6 +72,8 @@ void BuildGraphWithHashing(const std::vector<Point>& nodes,
 	}
 
 	// 1. 计算节点全局包围盒
+
+	// node 的坐标单位是 m
 	float min_x = nodes[0].x, min_y = nodes[0].y, min_z = nodes[0].z;
 	float max_x = nodes[0].x, max_y = nodes[0].y, max_z = nodes[0].z;
 
@@ -235,7 +237,7 @@ void BuildGraphWithHashing(const std::vector<Point>& nodes,
 		// 线程局部结果一致性校验
 		if (local_rows.size() != local_cols.size() || local_rows.size() != local_weights.size())
 		{
-			//PRINT_ERR << "[Error] Local COO size mismatch. thread local_rows=" << local_rows.size()
+			// PRINT_ERR << "[Error] Local COO size mismatch. thread local_rows=" << local_rows.size()
 			//		  << ", local_cols=" << local_cols.size()
 			//		  << ", local_weights=" << local_weights.size() << std::endl;
 		}
