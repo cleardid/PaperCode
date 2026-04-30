@@ -22,7 +22,7 @@ public class LogMessage
                 return Brushes.DarkCyan;
             if (Message.Contains("[Batch]") || Message.Contains("[UI]"))
                 return Brushes.Blue;
-            return Brushes.Black;
+            return Brushes.White;
         }
     }
 }

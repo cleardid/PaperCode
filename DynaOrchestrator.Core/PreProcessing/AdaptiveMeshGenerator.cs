@@ -376,11 +376,11 @@ namespace DynaOrchestrator.Core.PreProcessing
             int ny = (int)Math.Ceiling((box.MaxY - box.MinY) / dlDense);
             int nz = (int)Math.Ceiling((box.MaxZ - box.MinZ) / dlDense);
 
-            for (int i = 0; i <= nx; i++)
+            for (int i = 0; i < nx; i++)
             {
-                for (int j = 0; j <= ny; j++)
+                for (int j = 0; j < ny; j++)
                 {
-                    for (int k = 0; k <= nz; k++)
+                    for (int k = 0; k < nz; k++)
                     {
                         double x = box.MinX + i * dlDense;
                         double y = box.MinY + j * dlDense;
