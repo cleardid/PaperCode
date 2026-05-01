@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Data;
 
 namespace DynaOrchestrator.Desktop.ViewModels
 {
@@ -22,6 +23,39 @@ namespace DynaOrchestrator.Desktop.ViewModels
         public ObservableCollection<BatchCaseRecord> Cases { get; set; } = new ObservableCollection<BatchCaseRecord>();
         // 日志集合
         public ObservableCollection<LogMessage> Logs { get; set; } = new ObservableCollection<LogMessage>();
+
+        private string _logSearchText = string.Empty;
+
+        public string LogSearchText
+        {
+            get => _logSearchText;
+            set
+            {
+                if (_logSearchText != value)
+                {
+                    _logSearchText = value;
+                    OnPropertyChanged();
+
+                    FilteredLogs.Refresh();
+                    OnPropertyChanged(nameof(LogSearchResultText));
+                }
+            }
+        }
+
+        public ICollectionView FilteredLogs { get; }
+
+        public string LogSearchResultText
+        {
+            get
+            {
+                if (string.IsNullOrWhiteSpace(LogSearchText))
+                {
+                    return $"{Logs.Count} 行";
+                }
+
+                return $"{FilteredLogs.Cast<object>().Count()} / {Logs.Count} 行";
+            }
+        }
 
         // 取消令牌
         private CancellationTokenSource? _cts;
@@ -153,6 +187,14 @@ namespace DynaOrchestrator.Desktop.ViewModels
 
             // 构造函数中优先加载全局配置
             LoadBaseConfig();
+
+            FilteredLogs = CollectionViewSource.GetDefaultView(Logs);
+            FilteredLogs.Filter = FilterLogMessage;
+
+            Logs.CollectionChanged += (_, _) =>
+            {
+                OnPropertyChanged(nameof(LogSearchResultText));
+            };
         }
 
         /// <summary>
@@ -672,6 +714,23 @@ namespace DynaOrchestrator.Desktop.ViewModels
             {
                 Logs.RemoveAt(0);
             }
+        }
+
+        private bool FilterLogMessage(object item)
+        {
+            if (item is not LogMessage log)
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(LogSearchText))
+            {
+                return true;
+            }
+
+            return log.DisplayText.Contains(
+                LogSearchText,
+                StringComparison.OrdinalIgnoreCase);
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;

@@ -38,9 +38,17 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 用户正在搜索时不要自动滚动，避免新日志打断当前查看位置。
+        if (!string.IsNullOrWhiteSpace(_viewModel.LogSearchText))
+        {
+            return;
+        }
+
         // 节流：一批日志只安排一次滚动，避免大量日志导致 Dispatcher 堆积。
         if (_logScrollPending)
+        {
             return;
+        }
 
         _logScrollPending = true;
 

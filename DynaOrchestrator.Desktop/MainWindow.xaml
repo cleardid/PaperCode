@@ -244,16 +244,55 @@
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
-                <TextBlock Grid.Row="0"
-                   Text="实时运行日志"
-                   Foreground="#CBD5E1"
-                   FontSize="12"
-                   FontWeight="SemiBold"
-                   Margin="0,0,0,8"/>
+                <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0"
+                       Text="实时运行日志"
+                       Foreground="#CBD5E1"
+                       FontSize="12"
+                       FontWeight="SemiBold"
+                       VerticalAlignment="Center"/>
+
+                    <TextBlock Grid.Column="1"
+                       Text="{Binding LogSearchResultText}"
+                       Foreground="#94A3B8"
+                       FontSize="12"
+                       VerticalAlignment="Center"
+                       Margin="12,0,0,0"/>
+
+                    <StackPanel Grid.Column="2"
+                        Orientation="Horizontal"
+                        VerticalAlignment="Center">
+
+                        <TextBox Text="{Binding LogSearchText, UpdateSourceTrigger=PropertyChanged}"
+                         Width="260"
+                         Height="26"
+                         Padding="8,3"
+                         Background="#1F2937"
+                         Foreground="#E5E7EB"
+                         BorderBrush="#374151"
+                         CaretBrush="#E5E7EB"
+                         ToolTip="输入关键字过滤当前实时日志"/>
+
+                        <Button Content="清除搜索"
+                        Command="{Binding ClearLogSearchCommand}"
+                        Width="76"
+                        Height="26"
+                        Padding="6,0"
+                        Margin="8,0,0,0"
+                        Background="#374151"
+                        Foreground="#E5E7EB"/>
+                    </StackPanel>
+                </Grid>
 
                 <ListBox x:Name="LogListBox"
                      Grid.Row="1"
-                     ItemsSource="{Binding Logs}"
+                     ItemsSource="{Binding FilteredLogs}"
                      FontFamily="Consolas"
                      BorderThickness="0"
                      Background="Transparent"
@@ -277,6 +316,7 @@
                                         Padding="{TemplateBinding Padding}">
                                             <ContentPresenter/>
                                         </Border>
+
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsMouseOver" Value="True">
                                                 <Setter Property="Background" Value="#1F2937"/>
