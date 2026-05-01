@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Windows;
+using System.Windows.Input;
 
 namespace DynaOrchestrator.Desktop.ViewModels
 {
@@ -124,7 +125,15 @@ namespace DynaOrchestrator.Desktop.ViewModels
         public bool IsRunning
         {
             get => _isRunning;
-            set { _isRunning = value; OnPropertyChanged(); }
+            set
+            {
+                if (_isRunning == value) return;
+
+                _isRunning = value;
+                OnPropertyChanged();
+
+                RefreshCommandStates();
+            }
         }
 
         public RelayCommand StartCommand { get; }
@@ -250,6 +259,10 @@ namespace DynaOrchestrator.Desktop.ViewModels
             catch (Exception ex)
             {
                 AppendLog($"[Error] 加载 CSV 失败: {ex.Message}");
+            }
+            finally
+            {
+                RefreshCommandStates();
             }
         }
 
@@ -394,12 +407,17 @@ namespace DynaOrchestrator.Desktop.ViewModels
 
             // --- 2. 启动执行流程 ---
             IsRunning = true;
-            _cts = new CancellationTokenSource();
-            Logs.Clear();
-            AppendLog("[UI] 批处理任务已启动...");
+
+            CancellationTokenSource? runCts = null;
 
             try
             {
+                runCts = new CancellationTokenSource();
+                _cts = runCts;
+
+                Logs.Clear();
+                AppendLog("[UI] 批处理任务已启动...");
+
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                 string workspaceRoot = Path.GetFullPath(Path.Combine(baseDir, WorkspaceRootDir));
                 string fullCsvPath = Path.GetFullPath(Path.Combine(workspaceRoot, CasesCsvPath));
@@ -412,7 +430,7 @@ namespace DynaOrchestrator.Desktop.ViewModels
                     return;
                 }
 
-                // 【修改说明】：适配 AsyncLogBuffer 的新签名 Action<List<string>>
+                // 适配 AsyncLogBuffer 的新签名 Action<List<string>>
                 using var logBuffer = new AsyncLogBuffer(batchMessages =>
                 {
                     Application.Current.Dispatcher.InvokeAsync(() =>
@@ -459,7 +477,7 @@ namespace DynaOrchestrator.Desktop.ViewModels
                                 record.LastRunTime = lastRunTime;
                             }, System.Windows.Threading.DispatcherPriority.Background);
                         },
-                        cancellationToken: _cts.Token
+                        cancellationToken: runCts.Token
                     );
                 });
 
@@ -471,6 +489,16 @@ namespace DynaOrchestrator.Desktop.ViewModels
             }
             finally
             {
+                if (runCts != null)
+                {
+                    if (ReferenceEquals(_cts, runCts))
+                    {
+                        _cts = null;
+                    }
+
+                    runCts.Dispose();
+                }
+
                 IsRunning = false;
                 AppendLog("[UI] 批处理执行周期已结束。");
             }
@@ -478,10 +506,30 @@ namespace DynaOrchestrator.Desktop.ViewModels
 
         private void StopBatch()
         {
+            if (!IsRunning)
+            {
+                AppendLog("[UI] 当前没有正在运行的批处理任务。");
+                return;
+            }
+
             AppendLog("[UI] 用户请求立即停止任务，准备终止所有正在运行的 LS-DYNA 进程...");
 
-            // 先发出取消信号，阻止后续新任务继续进入执行阶段
-            _cts?.Cancel();
+            var cts = _cts;
+
+            if (cts != null)
+            {
+                try
+                {
+                    if (!cts.IsCancellationRequested)
+                    {
+                        cts.Cancel();
+                    }
+                }
+                catch (ObjectDisposedException)
+                {
+                    AppendLog("[Warning] 取消令牌已释放，忽略重复取消请求。");
+                }
+            }
 
             // 再直接杀死所有已经启动的求解器进程
             BatchRunner.ForceStopAllRunningCases(msg => AppendLog(msg));
@@ -497,6 +545,20 @@ namespace DynaOrchestrator.Desktop.ViewModels
         protected virtual void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        private static void RefreshCommandStates()
+        {
+            var dispatcher = Application.Current?.Dispatcher;
+
+            if (dispatcher == null || dispatcher.CheckAccess())
+            {
+                CommandManager.InvalidateRequerySuggested();
+            }
+            else
+            {
+                dispatcher.InvokeAsync(CommandManager.InvalidateRequerySuggested);
+            }
         }
 
         /// <summary>
