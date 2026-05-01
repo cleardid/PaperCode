@@ -623,13 +623,42 @@ namespace DynaOrchestrator.Desktop.ViewModels
         {
             foreach (var msg in messages)
             {
-                Logs.Add(new LogMessage
+                // 将包含 \r\n / \n / \r 的日志拆成独立行。
+                // 这样 UI 中每一个 ListBoxItem 都是真正的一行日志，便于逐行复制。
+                foreach (var line in SplitLogMessageToLines(msg))
                 {
-                    Message = msg
-                });
+                    Logs.Add(new LogMessage
+                    {
+                        Message = line
+                    });
+                }
             }
 
             TrimLogCollection();
+        }
+
+        /// <summary>
+        /// 将一条日志消息拆成多行。
+        /// 保留空行，用于显示阶段分隔或日志中的主动换行。
+        /// </summary>
+        private static IEnumerable<string> SplitLogMessageToLines(string? message)
+        {
+            if (message == null)
+            {
+                yield return string.Empty;
+                yield break;
+            }
+
+            string normalized = message
+                .Replace("\r\n", "\n")
+                .Replace('\r', '\n');
+
+            // 不显示空白日志行
+            foreach (var line in normalized.Split('\n'))
+            {
+                if (!string.IsNullOrWhiteSpace(line))
+                    yield return line;
+            }
         }
 
         /// <summary>

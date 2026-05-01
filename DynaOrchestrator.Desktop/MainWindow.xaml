@@ -238,32 +238,73 @@
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="实时运行日志" Foreground="#9CA3AF" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,8"/>
 
-                <ListBox x:Name="LogListBox" Grid.Row="1" ItemsSource="{Binding Logs}" 
-                         FontFamily="Consolas" BorderThickness="0" Background="Transparent"
-                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"         
-                         ScrollViewer.CanContentScroll="True"
-                         VirtualizingStackPanel.IsVirtualizing="True"
-                         VirtualizingStackPanel.VirtualizationMode="Recycling">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <StackPanel Orientation="Horizontal" Margin="0,2">
-                                <TextBlock Text="{Binding Timestamp, StringFormat={}[{0:HH:mm:ss}]}" Foreground="#6B7280" Margin="0,0,8,0"/>
-                                <TextBlock Text="{Binding Message}" Foreground="{Binding DisplayColor}" TextWrapping="Wrap"/>
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
+                <ListBox x:Name="LogListBox"
+                     Grid.Row="1"
+                     ItemsSource="{Binding Logs}"
+                     SelectionMode="Extended"
+                     FontFamily="Consolas"
+                     BorderThickness="0"
+                     Background="Transparent"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                     ScrollViewer.CanContentScroll="True"
+                     VirtualizingStackPanel.IsVirtualizing="True"
+                     VirtualizingStackPanel.VirtualizationMode="Recycling"
+                     PreviewKeyDown="LogListBox_PreviewKeyDown"
+                     PreviewMouseRightButtonDown="LogListBox_PreviewMouseRightButtonDown">
+
+                    <!-- 右键菜单：用于复制整行或多选日志行 -->
+                    <ListBox.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="复制选中日志行"
+                      Click="CopySelectedLogLines_Click" />
+                        </ContextMenu>
+                    </ListBox.ContextMenu>
+
+                    <!-- 保证每个日志项横向撑满，便于点击和选择 -->
                     <ListBox.ItemContainerStyle>
-                        <Style TargetType="ListBoxItem">
-                            <Setter Property="Focusable" Value="False"/>
-                            <Setter Property="Template">
-                                <Setter.Value>
-                                    <ControlTemplate TargetType="ListBoxItem">
-                                        <ContentPresenter/>
-                                    </ControlTemplate>
-                                </Setter.Value>
-                            </Setter>
+                        <Style TargetType="{x:Type ListBoxItem}">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="0" />
                         </Style>
                     </ListBox.ItemContainerStyle>
+
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <!--
+                            使用只读 TextBox 显示单行日志：
+                            1. 可以鼠标拖选文本并复制；
+                            2. 可以 Ctrl+C 复制选中文本；
+                            3. IsReadOnly=True 保证不能修改日志内容。
+                            -->
+                            <TextBox Text="{Binding Message, Mode=OneWay}"
+                                 IsReadOnly="True"
+                                 IsUndoEnabled="False"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="4,1"
+                                 FontFamily="Consolas"
+                                 FontSize="12"
+                                 TextWrapping="NoWrap"
+                                 AcceptsReturn="False"
+                                 HorizontalScrollBarVisibility="Disabled"
+                                 VerticalScrollBarVisibility="Disabled"
+                                 Cursor="IBeam"
+                                 Focusable="True"
+                                 GotKeyboardFocus="LogLineTextBox_GotKeyboardFocus">
+
+                                <!-- 当前行的右键菜单 -->
+                                <TextBox.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="复制当前行"
+                                  Click="CopyCurrentLogLine_Click" />
+                                        <MenuItem Header="复制选中日志行"
+                                  Click="CopySelectedLogLines_Click" />
+                                    </ContextMenu>
+                                </TextBox.ContextMenu>
+                            </TextBox>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
                 </ListBox>
             </Grid>
         </Border>
