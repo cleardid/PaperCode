@@ -1,4 +1,5 @@
-﻿using System.Collections.Concurrent;
+﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -6,98 +7,154 @@ using System.Threading.Tasks;
 namespace DynaOrchestrator.Core.Utils
 {
     /// <summary>
-    /// 异步日志缓冲器：防止高频日志爆发式输出导致 WPF UI 线程假死。
-    /// [渲染优化版]：将日志作为独立集合抛出，修复单条超大文本导致的滚动条失效与渲染卡顿。
+    /// 后台日志缓冲器。
+    ///
+    /// 作用：
+    /// 1. 后台线程可以高频调用 Log() 写入日志。
+    /// 2. 日志先进入队列，不直接刷新 UI。
+    /// 3. 定时批量刷新，降低 WPF Dispatcher 压力。
+    /// 4. FlushNowAsync / DisposeAsync 会等待 UI 真正完成写入。
     /// </summary>
-    public class AsyncLogBuffer : IAsyncDisposable, IDisposable
+    public sealed class AsyncLogBuffer : IAsyncDisposable
     {
         private readonly ConcurrentQueue<string> _queue = new();
 
-        // 【修改说明】：回调签名从 Action<string> 改为 Action<List<string>>
-        // 目的：让 UI 层能够遍历集合，逐条插入 ListBox，从而保证 ScrollIntoView 精准定位到最后一行。
-        private readonly Action<List<string>> _uiUpdateAction;
+        /// <summary>
+        /// 批量写入 UI 的异步回调。
+        /// 调用方应在该回调中切换到 UI Dispatcher，并等待写入完成。
+        /// </summary>
+        private readonly Func<IReadOnlyList<string>, Task> _uiUpdateAsync;
 
         private readonly int _flushIntervalMs;
         private readonly CancellationTokenSource _cts = new();
-        private Task? _flushTask;
 
         /// <summary>
-        /// 构造函数
+        /// 防止周期刷新、手动刷新、释放刷新同时操作队列。
         /// </summary>
-        /// <param name="uiUpdateAction">UI 线程的实际写入操作 (接收批量日志列表)</param>
-        /// <param name="flushIntervalMs">刷新间隔 (毫秒)，默认 200ms</param>
-        public AsyncLogBuffer(Action<List<string>> uiUpdateAction, int flushIntervalMs = 200)
-        {
-            _uiUpdateAction = uiUpdateAction ?? throw new ArgumentNullException(nameof(uiUpdateAction));
-            _flushIntervalMs = flushIntervalMs;
+        private readonly SemaphoreSlim _flushLock = new(1, 1);
 
-            // 启动后台定时刷新任务
+        private readonly Task _flushTask;
+
+        /// <summary>
+        /// 0 = 未释放，1 = 已释放。
+        /// 使用 int 是为了配合 Interlocked / Volatile。
+        /// </summary>
+        private int _disposed;
+
+        public AsyncLogBuffer(
+            Func<IReadOnlyList<string>, Task> uiUpdateAsync,
+            int flushIntervalMs = 200)
+        {
+            _uiUpdateAsync = uiUpdateAsync
+                ?? throw new ArgumentNullException(nameof(uiUpdateAsync));
+
+            _flushIntervalMs = flushIntervalMs > 0 ? flushIntervalMs : 200;
+
+            // 启动后台周期刷新任务。
             _flushTask = Task.Run(FlushLoopAsync);
         }
 
         /// <summary>
-        /// 提供给后台逻辑调用的日志入口 (极速返回，不阻塞后台运算)
+        /// 写入一条日志。
+        /// 该方法通常由后台线程调用，不直接访问 UI。
         /// </summary>
         public void Log(string message)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+                return;
+
             _queue.Enqueue(message);
         }
 
+        /// <summary>
+        /// 后台周期刷新循环。
+        /// 每隔 _flushIntervalMs 毫秒把队列中的日志批量推送到 UI。
+        /// </summary>
         private async Task FlushLoopAsync()
         {
             try
             {
                 while (!_cts.Token.IsCancellationRequested)
                 {
-                    await Task.Delay(_flushIntervalMs, _cts.Token).ConfigureAwait(false);
-                    FlushNow();
+                    await Task.Delay(_flushIntervalMs, _cts.Token)
+                        .ConfigureAwait(false);
+
+                    await FlushNowAsync()
+                        .ConfigureAwait(false);
                 }
             }
-            catch (TaskCanceledException)
+            catch (OperationCanceledException)
             {
-                // 正常取消
+                // DisposeAsync 触发取消时会进入这里，属于正常退出。
             }
         }
 
         /// <summary>
-        /// 立即将队列中的日志提取并推送到 UI
+        /// 立即刷新当前队列中的日志。
+        ///
+        /// 与旧版 FlushNow() 不同：
+        /// 该方法会等待 _uiUpdateAsync 执行完成。
+        /// 因此返回时，日志已经真正进入 UI 集合。
         /// </summary>
-        public void FlushNow()
+        public async Task FlushNowAsync()
         {
-            if (_queue.IsEmpty) return;
+            if (_queue.IsEmpty)
+                return;
 
-            // 【修改说明】：放弃使用 StringBuilder 拼接单行文本，改为使用 List 收集本轮所有日志。
-            var batchMessages = new List<string>();
+            await _flushLock.WaitAsync().ConfigureAwait(false);
 
-            // 批量出队
-            while (_queue.TryDequeue(out var msg))
+            try
             {
-                batchMessages.Add(msg);
+                if (_queue.IsEmpty)
+                    return;
+
+                var batchMessages = new List<string>();
+
+                while (_queue.TryDequeue(out var msg))
+                {
+                    batchMessages.Add(msg);
+                }
+
+                if (batchMessages.Count > 0)
+                {
+                    await _uiUpdateAsync(batchMessages)
+                        .ConfigureAwait(false);
+                }
             }
-
-            if (batchMessages.Count > 0)
+            finally
             {
-                // 触发 UI 更新委托，将集合整体抛出
-                _uiUpdateAction(batchMessages);
+                _flushLock.Release();
             }
         }
 
-        public void Dispose()
-        {
-            _cts.Cancel();
-            FlushNow(); // 确保残留日志被输出
-            _cts.Dispose();
-        }
-
+        /// <summary>
+        /// 停止后台刷新任务，并刷新剩余日志。
+        ///
+        /// DisposeAsync 返回时：
+        /// 1. 后台刷新循环已停止；
+        /// 2. 队列中剩余日志已写入 UI；
+        /// 3. 资源已释放。
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
             _cts.Cancel();
-            if (_flushTask != null)
+
+            try
             {
-                await Task.WhenAny(_flushTask, Task.Delay(500)); // 给它一点时间结束
+                await _flushTask.ConfigureAwait(false);
             }
-            FlushNow();
+            catch (OperationCanceledException)
+            {
+                // 正常取消。
+            }
+
+            await FlushNowAsync().ConfigureAwait(false);
+
             _cts.Dispose();
+            _flushLock.Dispose();
         }
     }
 }

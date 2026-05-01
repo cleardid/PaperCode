@@ -19,19 +19,36 @@ public partial class MainWindow : Window
         viewModel.Logs.CollectionChanged += Logs_CollectionChanged;
     }
 
+    private bool _logScrollPending;
+
     private void Logs_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (e.Action == NotifyCollectionChangedAction.Add)
+        if (e.Action != NotifyCollectionChangedAction.Add &&
+            e.Action != NotifyCollectionChangedAction.Reset)
         {
-            // 使用 BeginInvoke 延迟滚动，等待 WPF 内部 UI 元素生成完毕，防止状态冲突
-            Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+            return;
+        }
+
+        // 如果已经安排了一次滚动，就不重复安排。
+        if (_logScrollPending)
+            return;
+
+        _logScrollPending = true;
+
+        Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            try
             {
                 if (LogListBox.Items.Count > 0)
                 {
                     var lastItem = LogListBox.Items[LogListBox.Items.Count - 1];
                     LogListBox.ScrollIntoView(lastItem);
                 }
-            }), System.Windows.Threading.DispatcherPriority.Background);
-        }
+            }
+            finally
+            {
+                _logScrollPending = false;
+            }
+        }), System.Windows.Threading.DispatcherPriority.Background);
     }
 }

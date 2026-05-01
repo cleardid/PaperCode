@@ -409,6 +409,7 @@ namespace DynaOrchestrator.Desktop.ViewModels
             IsRunning = true;
 
             CancellationTokenSource? runCts = null;
+            AsyncLogBuffer? logBuffer = null;
 
             try
             {
@@ -430,32 +431,15 @@ namespace DynaOrchestrator.Desktop.ViewModels
                     return;
                 }
 
-                // 适配 AsyncLogBuffer 的新签名 Action<List<string>>
-                using var logBuffer = new AsyncLogBuffer(batchMessages =>
-                {
-                    Application.Current.Dispatcher.InvokeAsync(() =>
-                    {
-                        // 1. 遍历批量传递过来的日志，作为独立记录插入 ObservableCollection
-                        // 此时 WPF 绑定的 ListBox 会将它们渲染为独立的 Item，ScrollIntoView 将正常工作
-                        foreach (var msg in batchMessages)
-                        {
-                            AppendLog(msg);
-                        }
+                // 使用新版 AsyncLogBuffer：
+                // 1. 后台线程只负责写入缓冲队列；
+                // 2. AppendLogsBatchAsync 负责切回 UI Dispatcher；
+                // 3. FlushNowAsync / DisposeAsync 会等待日志真正写入 ObservableCollection。
+                logBuffer = new AsyncLogBuffer(
+                    AppendLogsBatchAsync,
+                    flushIntervalMs: 200);
 
-                        // 2. 【新增保护机制】：日志行数截断 (防 OOM 与 UI 假死)
-                        // 当批处理运行成百上千个工况时，无限增长的 UI 元素会导致内存溢出。
-                        const int MaxLogLines = 5000;
-                        if (Logs.Count > MaxLogLines)
-                        {
-                            // 批量移除顶部的旧日志，保持最新的 5000 行可见
-                            int removeCount = Logs.Count - MaxLogLines;
-                            for (int i = 0; i < removeCount; i++)
-                            {
-                                Logs.RemoveAt(0);
-                            }
-                        }
-                    }, System.Windows.Threading.DispatcherPriority.Background);
-                }, flushIntervalMs: 200);
+                var currentLogBuffer = logBuffer;
 
                 await Task.Run(() =>
                 {
@@ -467,7 +451,7 @@ namespace DynaOrchestrator.Desktop.ViewModels
                         ncpuPerCase: NcpuPerCase,
                         memoryPerCase: MemoryPerCase,
                         records: recordList,
-                        logger: logBuffer.Log,
+                        logger: currentLogBuffer.Log,
                         uiStateUpdater: (record, status, completed, lastRunTime) =>
                         {
                             Application.Current.Dispatcher.InvokeAsync(() =>
@@ -481,14 +465,46 @@ namespace DynaOrchestrator.Desktop.ViewModels
                     );
                 });
 
-                logBuffer.FlushNow();
+                // 批处理主体结束后，先强制刷新一次。
+                // 返回时，当前日志队列中的内容已经真正写入 UI。
+                await logBuffer.FlushNowAsync();
+            }
+            catch (OperationCanceledException)
+            {
+                // 如果取消异常向上传递到 UI 层，先刷新 Core 层残留日志，再写 UI 层取消提示。
+                if (logBuffer != null)
+                {
+                    await logBuffer.FlushNowAsync();
+                }
+
+                AppendLog("[UI] 批处理已取消。");
             }
             catch (Exception ex)
             {
+                // 如果发生异常，先刷新 Core 层已有日志，避免错误提示插入到更早的后台日志之前。
+                if (logBuffer != null)
+                {
+                    await logBuffer.FlushNowAsync();
+                }
+
                 AppendLog($"[Error] 批处理过程中发生异常: {ex.Message}");
             }
             finally
             {
+                if (logBuffer != null)
+                {
+                    try
+                    {
+                        // 停止日志后台刷新循环，并写完剩余日志。
+                        // DisposeAsync 返回后，日志缓冲器中不再有未显示的日志。
+                        await logBuffer.DisposeAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"[Warning] 日志缓冲器释放失败: {ex.Message}");
+                    }
+                }
+
                 if (runCts != null)
                 {
                     if (ReferenceEquals(_cts, runCts))
@@ -531,14 +547,102 @@ namespace DynaOrchestrator.Desktop.ViewModels
                 }
             }
 
-            // 再直接杀死所有已经启动的求解器进程
+            // 再直接杀死所有已经启动的求解器进程。
+            // 这里只发出停止信号和强制终止进程，不释放 _cts；
+            // _cts 的释放统一由 StartBatch() 的 finally 负责。
             BatchRunner.ForceStopAllRunningCases(msg => AppendLog(msg));
         }
 
+        private const int MaxLogLines = 5000;
+
+        /// <summary>
+        /// 写入单条 UI 日志。
+        /// 普通 UI 事件、异常提示可以继续调用这个方法。
+        /// </summary>
         private void AppendLog(string message)
         {
-            var log = new LogMessage { Message = message };
-            Logs.Add(log);
+            AppendLogsBatch(new[] { message });
+        }
+
+        /// <summary>
+        /// 同步批量追加日志。
+        ///
+        /// 该方法适合 UI 线程直接调用。
+        /// 如果当前不在 UI 线程，会同步切回 Dispatcher，保证返回时日志已经写入。
+        /// </summary>
+        private void AppendLogsBatch(IReadOnlyList<string> messages)
+        {
+            if (messages.Count == 0)
+                return;
+
+            var dispatcher = Application.Current?.Dispatcher;
+
+            if (dispatcher == null || dispatcher.CheckAccess())
+            {
+                AppendLogsBatchCore(messages);
+            }
+            else
+            {
+                dispatcher.Invoke(() =>
+                {
+                    AppendLogsBatchCore(messages);
+                }, System.Windows.Threading.DispatcherPriority.Background);
+            }
+        }
+
+        /// <summary>
+        /// 异步批量追加日志。
+        ///
+        /// AsyncLogBuffer 会调用这个方法。
+        /// 返回的 Task 完成时，表示日志已经真正写入 ObservableCollection。
+        /// </summary>
+        private Task AppendLogsBatchAsync(IReadOnlyList<string> messages)
+        {
+            if (messages.Count == 0)
+                return Task.CompletedTask;
+
+            var dispatcher = Application.Current?.Dispatcher;
+
+            if (dispatcher == null || dispatcher.CheckAccess())
+            {
+                AppendLogsBatchCore(messages);
+                return Task.CompletedTask;
+            }
+
+            return dispatcher.InvokeAsync(() =>
+            {
+                AppendLogsBatchCore(messages);
+            }, System.Windows.Threading.DispatcherPriority.Background).Task;
+        }
+
+        /// <summary>
+        /// 真正修改 Logs 集合的方法。
+        /// 该方法只能在 UI 线程执行。
+        /// </summary>
+        private void AppendLogsBatchCore(IReadOnlyList<string> messages)
+        {
+            foreach (var msg in messages)
+            {
+                Logs.Add(new LogMessage
+                {
+                    Message = msg
+                });
+            }
+
+            TrimLogCollection();
+        }
+
+        /// <summary>
+        /// 控制日志最大保留行数，避免长时间批处理导致 UI 内存持续增长。
+        /// </summary>
+        private void TrimLogCollection()
+        {
+            int removeCount = Logs.Count - MaxLogLines;
+
+            for (int i = 0; i < removeCount; i++)
+            {
+                Logs.RemoveAt(0);
+            }
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
