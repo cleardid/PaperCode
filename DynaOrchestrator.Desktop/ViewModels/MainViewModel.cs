@@ -416,9 +416,6 @@ namespace DynaOrchestrator.Desktop.ViewModels
                 runCts = new CancellationTokenSource();
                 _cts = runCts;
 
-                Logs.Clear();
-                AppendLog("[UI] 批处理任务已启动...");
-
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                 string workspaceRoot = Path.GetFullPath(Path.Combine(baseDir, WorkspaceRootDir));
                 string fullCsvPath = Path.GetFullPath(Path.Combine(workspaceRoot, CasesCsvPath));
@@ -430,6 +427,8 @@ namespace DynaOrchestrator.Desktop.ViewModels
                     AppendLog("[Warning] 未勾选任何任务，请先在列表中挑选任务。");
                     return;
                 }
+
+                AppendLog($"[UI] 批处理任务已启动，选中 {recordList.Count} 个工况。");
 
                 // 使用新版 AsyncLogBuffer：
                 // 1. 后台线程只负责写入缓冲队列；
@@ -553,7 +552,7 @@ namespace DynaOrchestrator.Desktop.ViewModels
             BatchRunner.ForceStopAllRunningCases(msg => AppendLog(msg));
         }
 
-        private const int MaxLogLines = 5000;
+        private const int MaxLogLines = 10000;
 
         /// <summary>
         /// 写入单条 UI 日志。
@@ -629,6 +628,7 @@ namespace DynaOrchestrator.Desktop.ViewModels
                 {
                     Logs.Add(new LogMessage
                     {
+                        Timestamp = DateTime.Now,
                         Message = line
                     });
                 }
