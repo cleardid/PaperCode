@@ -130,24 +130,19 @@ namespace DynaOrchestrator.Core.Batch
                 // 如果捕获到取消异常
                 catch (OperationCanceledException)
                 {
-                    UpdateRuntimeState(record, "Canceled", "0", uiStateUpdater);
-
-                    if (!string.IsNullOrWhiteSpace(fullCsvPath))
-                        CaseCsvWriter.MarkCanceled(fullCsvPath, record.CaseId);
-
                     results.Add(new BatchRunResult
                     {
                         CaseId = record.CaseId,
                         GeomType = record.GeomType,
                         DatasetStage = record.DatasetStage,
-                        Status = "canceled",
-                        Message = "Canceled before execution",
+                        Status = "Canceled",
+                        Message = "Canceled before execution; case state preserved",
                         ExitCode = -2,
                         StartTime = DateTime.Now,
                         EndTime = DateTime.Now
                     });
 
-                    logger($"[Batch] 工况 {record.CaseId} 被用户取消。");
+                    logger($"[Batch] 工况 {record.CaseId} 尚未开始执行，已响应取消；保留原有状态 {record.Status}。");
                 }
                 finally
                 {
@@ -303,72 +298,37 @@ namespace DynaOrchestrator.Core.Batch
             }
             catch (OperationCanceledException)
             {
-                result.Status = "canceled";
+                var rollback = ResolveInterruptedCaseState(
+                    paths,
+                    caseConfig,
+                    record.CaseId,
+                    isCancellation: true,
+                    logger);
+
+                result.Status = rollback.Status;
                 result.Message = "Canceled by user";
                 result.ExitCode = -2;
 
-                UpdateRuntimeState(record, "Canceled", "0", uiStateUpdater);
+                UpdateRuntimeState(record, rollback.Status, rollback.Completed, uiStateUpdater);
+                PersistCaseState(casesCsvPath, record.CaseId, rollback.Status);
 
-                if (!string.IsNullOrWhiteSpace(casesCsvPath))
-                    CaseCsvWriter.MarkCanceled(casesCsvPath, record.CaseId);
-
-                logger($"[Batch][取消] {record.CaseId}: 工况已被用户终止。");
+                logger($"[Batch][取消] {record.CaseId}: 工况已被用户终止，当前状态为 {rollback.Status}。");
             }
             catch (Exception ex)
             {
-                // 阶段性失败回滚逻辑
+                var rollback = ResolveInterruptedCaseState(
+                    paths,
+                    caseConfig,
+                    record.CaseId,
+                    isCancellation: false,
+                    logger);
 
-                string finalStatus = "Failed"; // 默认完全失败
-                string completedFlag = "0";
-
-                try
-                {
-                    // 探测磁盘文件，判断是否完成了特定的前置阶段
-                    bool hasPreProcessedFile = File.Exists(paths.LocalOutputKFile);
-                    bool hasSimulatedFile = File.Exists(paths.LocalTrhistFile);
-
-                    if (caseConfig.Pipeline.EnableSimulation && hasPreProcessedFile && !hasSimulatedFile)
-                    {
-                        // 场景 1：打算跑仿真，但挂了。此时如果存在 OutputKFile，说明前处理是成功的（或是历史遗留的成功）
-                        finalStatus = "PreProcessed";
-                        logger($"[Batch][恢复] {record.CaseId}: 求解失败，但已回滚状态至 PreProcessed。");
-                    }
-                    else if (caseConfig.Pipeline.EnablePostProcessing && hasSimulatedFile)
-                    {
-                        // 场景 2：打算跑后处理图引擎，但挂了。此时如果存在 TrhistFile，说明 LS-DYNA 求解是成功的
-                        finalStatus = "Simulated";
-                        logger($"[Batch][恢复] {record.CaseId}: 图特征构建失败，但已回滚状态至 Simulated。");
-                    }
-                    else
-                    {
-                        // 场景 3：第一阶段网格生成就挂了，或者文件丢失，那就是彻底的 Failed
-                        logger($"[Batch][失败] {record.CaseId}: {ex.Message}");
-                    }
-                }
-                catch (Exception probeEx)
-                {
-                    // 如果探测文件系统也报错了，保底判定为失败
-                    logger($"[Batch][探测异常] 状态回滚判定失败: {probeEx.Message}");
-                }
-
-                // 赋值给结果对象
-                result.Status = finalStatus;
+                result.Status = rollback.Status;
                 result.Message = ex.Message;
                 result.ExitCode = -1;
 
-                // 更新内存状态，通知界面刷新
-                UpdateRuntimeState(record, finalStatus, completedFlag, uiStateUpdater);
-
-                // 更新 CSV 持久化状态
-                if (!string.IsNullOrWhiteSpace(casesCsvPath))
-                {
-                    if (finalStatus == "Simulated")
-                        CaseCsvWriter.MarkSimulated(casesCsvPath, record.CaseId);
-                    else if (finalStatus == "PreProcessed")
-                        CaseCsvWriter.MarkPreProcessed(casesCsvPath, record.CaseId);
-                    else
-                        CaseCsvWriter.MarkFailed(casesCsvPath, record.CaseId);
-                }
+                UpdateRuntimeState(record, rollback.Status, rollback.Completed, uiStateUpdater);
+                PersistCaseState(casesCsvPath, record.CaseId, rollback.Status);
             }
             finally
             {
@@ -376,6 +336,57 @@ namespace DynaOrchestrator.Core.Batch
             }
 
             return result;
+        }
+
+        private static (string Status, string Completed) ResolveInterruptedCaseState(
+    BatchCasePaths paths,
+    AppConfig caseConfig,
+    string caseId,
+    bool isCancellation,
+    Action<string> logger)
+        {
+            string fallbackStatus = isCancellation ? "Canceled" : "Failed";
+
+            try
+            {
+                bool hasPreProcessedFile = File.Exists(paths.LocalOutputKFile);
+                bool hasSimulatedFile = File.Exists(paths.LocalTrhistFile);
+
+                if (caseConfig.Pipeline.EnablePostProcessing && hasSimulatedFile)
+                {
+                    logger($"[Batch][恢复] {caseId}: {(isCancellation ? "取消" : "异常")}时检测到求解结果，已回滚状态至 Simulated。");
+                    return ("Simulated", "0");
+                }
+
+                if (caseConfig.Pipeline.EnableSimulation && hasPreProcessedFile)
+                {
+                    logger($"[Batch][恢复] {caseId}: {(isCancellation ? "取消" : "异常")}时检测到前处理结果，已回滚状态至 PreProcessed。");
+                    return ("PreProcessed", "0");
+                }
+
+                logger($"[Batch][{(isCancellation ? "取消" : "失败")}] {caseId}: 未检测到可保留的阶段成果，状态记为 {fallbackStatus}。");
+            }
+            catch (Exception probeEx)
+            {
+                logger($"[Batch][探测异常] 状态回滚判定失败: {probeEx.Message}");
+            }
+
+            return (fallbackStatus, "0");
+        }
+
+        private static void PersistCaseState(string? casesCsvPath, string caseId, string status)
+        {
+            if (string.IsNullOrWhiteSpace(casesCsvPath))
+                return;
+
+            if (string.Equals(status, "Simulated", StringComparison.OrdinalIgnoreCase))
+                CaseCsvWriter.MarkSimulated(casesCsvPath, caseId);
+            else if (string.Equals(status, "PreProcessed", StringComparison.OrdinalIgnoreCase))
+                CaseCsvWriter.MarkPreProcessed(casesCsvPath, caseId);
+            else if (string.Equals(status, "Canceled", StringComparison.OrdinalIgnoreCase))
+                CaseCsvWriter.MarkCanceled(casesCsvPath, caseId);
+            else
+                CaseCsvWriter.MarkFailed(casesCsvPath, caseId);
         }
 
         private static void UpdateRuntimeState(

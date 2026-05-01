@@ -125,7 +125,7 @@ namespace DynaOrchestrator.Core
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     logger?.Invoke("[获得锁] 开始执行非托管图提取与数据集生成...");
-                    RunPostProcessing(config, exp, other, record, actualTrhistPath, logger);
+                    RunPostProcessing(config, exp, other, record, actualTrhistPath, cancellationToken, logger);
                 }
                 finally
                 {
@@ -190,8 +190,10 @@ namespace DynaOrchestrator.Core
         /// 执行图引擎后处理，提取物理特征并序列化为 NPZ 数据集。
         /// 此方法深入使用了非托管内存的零拷贝技术，大幅降低了大数据量下的内存峰值（OOM 风险）。
         /// </summary>
-        private static void RunPostProcessing(PipelineConfig config, ExplosiveParams exp, OtherConfig other, BatchCaseRecord record, string actualTrhistPath, Action<string>? logger)
+        private static void RunPostProcessing(PipelineConfig config, ExplosiveParams exp, OtherConfig other, BatchCaseRecord record, string actualTrhistPath, CancellationToken cancellationToken, Action<string>? logger)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             logger?.Invoke("\n[Phase 3] 提取物理图特征与静态属性...");
 
             // 注册 C# 回调到 C++，用于将 C++ 引擎的计算进度输出到 WPF 界面
@@ -206,9 +208,13 @@ namespace DynaOrchestrator.Core
 
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // 将返回的 IntPtr 映射为 C# 结构体（仅映射元数据与指针，不拷贝数组实体）
                 GraphData data = Marshal.PtrToStructure<GraphData>(ptr);
                 ValidateGraphData(data); // 内存安全前置校验
+
+                cancellationToken.ThrowIfCancellationRequested();
 
                 // 启用 unsafe 指针包装
                 // 使用 ReadOnlySpan<T> 直接在 C++ 分配的非托管内存上进行视图包装，实现零拷贝。
@@ -230,6 +236,8 @@ namespace DynaOrchestrator.Core
                     var labels = EngineeringLabelExtractor.Extract(
                         actualTrhistPath, featuresSpan, data.num_nodes, data.time_steps, data.feature_dim, logger, 4, 1e-7f);
 
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     // 提取边界语义先验信息
                     // 遍历所有节点，如果节点到墙/边/角的距离小于或等于 WallMargin 阈值，则将对应的标志位设置为 1.0f（True），否则设置为 0.0f（False）
                     float[] nearWallFlag = BuildBinarySemanticFlag(attrsSpan, data.num_nodes, data.attr_dim, 8, (float)other.WallMargin);
@@ -242,6 +250,8 @@ namespace DynaOrchestrator.Core
 
                     // 序列化前执行算法模型要求的对齐与合法性校验
                     ValidateStgnsV1Export(rowsSpan, colsSpan, weightsSpan, featuresSpan, attrsSpan, labels.PeakOverpressure, labels.ArrivalTime, labels.PositiveImpulse, labels.PositiveDuration, nearWallFlag, nearEdgeFlag, nearCornerFlag, samplingRegionId, caseCond, data.num_nodes, data.time_steps, data.feature_dim, data.attr_dim);
+
+                    cancellationToken.ThrowIfCancellationRequested();
 
                     // 将 Span 数据通过 MemoryMarshal 映射为 byte 后直接写入磁盘压缩流
                     NpzWriter.Save(config.NpzOutputFile, rowsSpan, colsSpan, weightsSpan, featuresSpan, attrsSpan, labels.PeakOverpressure, labels.ArrivalTime, labels.PositiveImpulse, labels.PositiveDuration, nearWallFlag, nearEdgeFlag, nearCornerFlag, samplingRegionId, caseCond, data.num_nodes, data.time_steps, data.feature_dim, data.attr_dim, logger);
@@ -256,6 +266,11 @@ namespace DynaOrchestrator.Core
                         kFilePathToKeep: config.OutputKFile,
                         logger: logger);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                logger?.Invoke("[Info] 后处理收到取消请求。");
+                throw;
             }
             catch (Exception ex)
             {
