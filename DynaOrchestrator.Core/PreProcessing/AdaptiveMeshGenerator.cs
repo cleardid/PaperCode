@@ -382,9 +382,10 @@ namespace DynaOrchestrator.Core.PreProcessing
                 {
                     for (int k = 0; k < nz; k++)
                     {
-                        double x = box.MinX + i * dlDense;
-                        double y = box.MinY + j * dlDense;
-                        double z = box.MinZ + k * dlDense;
+                        // 避免坐标轴区域观测点密集
+                        double x = box.MinX + (i + 0.5) * dlDense;
+                        double y = box.MinY + (j + 0.5) * dlDense;
+                        double z = box.MinZ + (k + 0.5) * dlDense;
 
                         // 先判断该点是否位于封闭 STL 内部
                         var p = new Vector3 { X = x, Y = y, Z = z };

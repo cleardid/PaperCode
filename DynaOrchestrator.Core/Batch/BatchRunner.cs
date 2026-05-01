@@ -214,6 +214,10 @@ namespace DynaOrchestrator.Core.Batch
                 StartTime = DateTime.Now
             };
 
+            // 构建该工况的专属配置
+            AppConfig caseConfig = BatchConfigBuilder.Build(
+                baseConfig, record, paths, ncpuPerCase, memoryPerCase, logger);
+
             try
             {
                 logger($"\n[Batch] 开始工况: {record.CaseId}");
@@ -224,10 +228,6 @@ namespace DynaOrchestrator.Core.Batch
                 // 2. 同步更新 CSV 文件
                 if (!string.IsNullOrWhiteSpace(casesCsvPath))
                     CaseCsvWriter.MarkRunning(casesCsvPath, record.CaseId);
-
-                // 1. 构建该工况的专属配置
-                AppConfig caseConfig = BatchConfigBuilder.Build(
-                    baseConfig, record, paths, ncpuPerCase, memoryPerCase, logger);
 
                 // 基于阶段的文件目录生命周期安全管理
                 if (caseConfig.Pipeline.EnablePreProcessing)
@@ -316,16 +316,59 @@ namespace DynaOrchestrator.Core.Batch
             }
             catch (Exception ex)
             {
-                result.Status = "failed";
+                // 阶段性失败回滚逻辑
+
+                string finalStatus = "Failed"; // 默认完全失败
+                string completedFlag = "0";
+
+                try
+                {
+                    // 探测磁盘文件，判断是否完成了特定的前置阶段
+                    bool hasPreProcessedFile = File.Exists(paths.LocalOutputKFile);
+                    bool hasSimulatedFile = File.Exists(paths.LocalTrhistFile);
+
+                    if (caseConfig.Pipeline.EnableSimulation && hasPreProcessedFile && !hasSimulatedFile)
+                    {
+                        // 场景 1：打算跑仿真，但挂了。此时如果存在 OutputKFile，说明前处理是成功的（或是历史遗留的成功）
+                        finalStatus = "PreProcessed";
+                        logger($"[Batch][恢复] {record.CaseId}: 求解失败，但已回滚状态至 PreProcessed。");
+                    }
+                    else if (caseConfig.Pipeline.EnablePostProcessing && hasSimulatedFile)
+                    {
+                        // 场景 2：打算跑后处理图引擎，但挂了。此时如果存在 TrhistFile，说明 LS-DYNA 求解是成功的
+                        finalStatus = "Simulated";
+                        logger($"[Batch][恢复] {record.CaseId}: 图特征构建失败，但已回滚状态至 Simulated。");
+                    }
+                    else
+                    {
+                        // 场景 3：第一阶段网格生成就挂了，或者文件丢失，那就是彻底的 Failed
+                        logger($"[Batch][失败] {record.CaseId}: {ex.Message}");
+                    }
+                }
+                catch (Exception probeEx)
+                {
+                    // 如果探测文件系统也报错了，保底判定为失败
+                    logger($"[Batch][探测异常] 状态回滚判定失败: {probeEx.Message}");
+                }
+
+                // 赋值给结果对象
+                result.Status = finalStatus;
                 result.Message = ex.Message;
                 result.ExitCode = -1;
 
-                UpdateRuntimeState(record, "Failed", "0", uiStateUpdater);
+                // 更新内存状态，通知界面刷新
+                UpdateRuntimeState(record, finalStatus, completedFlag, uiStateUpdater);
 
+                // 更新 CSV 持久化状态
                 if (!string.IsNullOrWhiteSpace(casesCsvPath))
-                    CaseCsvWriter.MarkFailed(casesCsvPath, record.CaseId);
-
-                logger($"[Batch][失败] {record.CaseId}: {ex.Message}");
+                {
+                    if (finalStatus == "Simulated")
+                        CaseCsvWriter.MarkSimulated(casesCsvPath, record.CaseId);
+                    else if (finalStatus == "PreProcessed")
+                        CaseCsvWriter.MarkPreProcessed(casesCsvPath, record.CaseId);
+                    else
+                        CaseCsvWriter.MarkFailed(casesCsvPath, record.CaseId);
+                }
             }
             finally
             {
