@@ -257,6 +257,11 @@ namespace DynaOrchestrator.Core
                         logger: logger);
                 }
             }
+            catch (Exception ex)
+            {
+                logger?.Invoke($"[Error] 后处理失败：{ex}");
+                throw;
+            }
             finally
             {
                 // 无论 C# 侧发生何种异常，必须保证 C++ 堆内存被安全释放

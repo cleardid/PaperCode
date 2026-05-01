@@ -1,4 +1,5 @@
 ﻿using System.IO.Compression;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -79,31 +80,69 @@ namespace DynaOrchestrator.Core.Solver
             logger?.Invoke($"[后处理] 数据集已序列化保存至: {path}");
         }
 
-        private static void WriteNpy<T>(ZipArchive archive, string entryName, ReadOnlySpan<T> data, int[] shape, string dtype) where T : unmanaged
+        private static void WriteNpy<T>(
+            ZipArchive archive,
+            string entryName,
+            ReadOnlySpan<T> data,
+            int[] shape,
+            string dtype) where T : unmanaged
         {
+            // NPZ 是 ZIP 容器，每个数组写成一个 .npy 条目。
             var entry = archive.CreateEntry(entryName, CompressionLevel.NoCompression);
+
             using var stream = entry.Open();
-            // 使用 leaveOpen: true 确保 Writer 不会关闭底层流，避免压缩流截断
             using var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
 
-            // NPY Magic Header
-            writer.Write(new byte[] { 0x93, 0x4E, 0x55, 0x4D, 0x50, 0x59, 0x01, 0x00 });
+            // 写入 .npy magic string 和版本号：\x93NUMPY v1.0。
+            writer.Write(new byte[]
+            {
+        0x93, 0x4E, 0x55, 0x4D, 0x50, 0x59, 0x01, 0x00
+            });
 
-            string shapeStr = shape.Length == 1 ? $"({shape[0]},)" : $"({string.Join(", ", shape)})";
-            string dictStr = $"{{'descr': '{dtype}', 'fortran_order': False, 'shape': {shapeStr}, }}";
+            // 一维 shape 需要写成 "(N,)"，多维写成 "(D0, D1, ...)"。
+            string shapeStr = shape.Length == 1
+                ? $"({shape[0]},)"
+                : $"({string.Join(", ", shape)})";
 
+            string dictStr =
+                $"{{'descr': '{dtype}', 'fortran_order': False, 'shape': {shapeStr}, }}";
+
+            // .npy v1.0 要求 header 总长度按 64 字节对齐。
             int padding = 64 - ((10 + dictStr.Length) % 64);
             dictStr += new string(' ', padding) + "\n";
 
             writer.Write((ushort)dictStr.Length);
             writer.Write(Encoding.ASCII.GetBytes(dictStr));
-
-            // 必须在写入裸字节前刷新缓冲
             writer.Flush();
 
-            // 零拷贝核心：将泛型内存块直接映射为 Byte Span 并写入底层压缩流
-            ReadOnlySpan<byte> byteData = MemoryMarshal.AsBytes(data);
-            stream.Write(byteData);
+            // 大数组不能一次性 MemoryMarshal.AsBytes(data)，否则可能超过 int.MaxValue。
+            WriteSpanAsBytesChunked(stream, data);
+        }
+
+        private static void WriteSpanAsBytesChunked<T>(
+            Stream stream,
+            ReadOnlySpan<T> data) where T : unmanaged
+        {
+            int elementSize = Unsafe.SizeOf<T>();
+
+            // 控制单次 byte span 大小，避免超大数组转换时溢出。
+            const int maxChunkBytes = 64 * 1024 * 1024;
+            int maxChunkElements = Math.Max(1, maxChunkBytes / elementSize);
+
+            int offset = 0;
+
+            while (offset < data.Length)
+            {
+                int count = Math.Min(maxChunkElements, data.Length - offset);
+
+                // Slice 不复制数据，只创建当前块的视图。
+                ReadOnlySpan<T> chunk = data.Slice(offset, count);
+                ReadOnlySpan<byte> bytes = MemoryMarshal.AsBytes(chunk);
+
+                stream.Write(bytes);
+
+                offset += count;
+            }
         }
 
         public static void ValidateBasicStructure(string npzPath, Action<string>? logger = null)
