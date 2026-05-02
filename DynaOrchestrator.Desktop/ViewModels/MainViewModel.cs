@@ -11,10 +11,13 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Data;
+using System.Diagnostics;
+using System.Text;
+using System.Threading.Channels;
 
 namespace DynaOrchestrator.Desktop.ViewModels
 {
-    public class MainViewModel : INotifyPropertyChanged
+    public class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         // 全局基础配置
         private AppConfig _baseConfig = new AppConfig();
@@ -23,6 +26,11 @@ namespace DynaOrchestrator.Desktop.ViewModels
         public ObservableCollection<BatchCaseRecord> Cases { get; set; } = new ObservableCollection<BatchCaseRecord>();
         // 日志集合
         public ObservableCollection<LogMessage> Logs { get; set; } = new ObservableCollection<LogMessage>();
+
+        // 日志显示上限
+        private const int MaxLogLines = 20000;
+        // 日志裁剪阈值
+        private const int LogTrimBufferLines = 2000;
 
         private string _logSearchText = string.Empty;
 
@@ -61,6 +69,15 @@ namespace DynaOrchestrator.Desktop.ViewModels
         private CancellationTokenSource? _cts;
         // 配置文件信息
         private readonly string _configPath = "config.json";
+
+        // 配置日志写入参数
+        // 日志文件异步写入
+        private const int LogFileBatchSize = 512;
+
+        private readonly string _logFilePath;
+        private readonly Channel<string> _logFileChannel;
+        private readonly CancellationTokenSource _logFileWriterCts = new();
+        private readonly Task _logFileWriterTask;
 
         // --- 动态读取 Config 中的路径配置 ---
         public string WorkspaceRootDir
@@ -175,15 +192,28 @@ namespace DynaOrchestrator.Desktop.ViewModels
         public RelayCommand LoadCsvCommand { get; }
         public RelayCommand SelectAllCommand { get; }
         public RelayCommand DeselectAllCommand { get; }
+        public RelayCommand ClearLogSearchCommand { get; }
 
         public MainViewModel()
         {
+            _logFilePath = CreateLogFilePath();
+
+            _logFileChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                AllowSynchronousContinuations = false
+            });
+
+            _logFileWriterTask = Task.Run(ProcessLogFileQueueAsync);
+
             StartCommand = new RelayCommand(StartBatch, () => !IsRunning && Cases.Count > 0);
             StopCommand = new RelayCommand(StopBatch, () => IsRunning);
             LoadCsvCommand = new RelayCommand(LoadCsv, () => !IsRunning);
 
             SelectAllCommand = new RelayCommand(() => SetAllSelection(true), () => !IsRunning && Cases.Count > 0);
             DeselectAllCommand = new RelayCommand(() => SetAllSelection(false), () => !IsRunning && Cases.Count > 0);
+            ClearLogSearchCommand = new RelayCommand(() => LogSearchText = string.Empty);
 
             // 构造函数中优先加载全局配置
             LoadBaseConfig();
@@ -594,8 +624,6 @@ namespace DynaOrchestrator.Desktop.ViewModels
             BatchRunner.ForceStopAllRunningCases(msg => AppendLog(msg));
         }
 
-        private const int MaxLogLines = 10000;
-
         /// <summary>
         /// 写入单条 UI 日志。
         /// 普通 UI 事件、异常提示可以继续调用这个方法。
@@ -662,21 +690,29 @@ namespace DynaOrchestrator.Desktop.ViewModels
         /// </summary>
         private void AppendLogsBatchCore(IReadOnlyList<string> messages)
         {
+            var fileLines = new List<string>();
+
             foreach (var msg in messages)
             {
                 // 将包含 \r\n / \n / \r 的日志拆成独立行。
                 // 这样 UI 中每一个 ListBoxItem 都是真正的一行日志，便于逐行复制。
                 foreach (var line in SplitLogMessageToLines(msg))
                 {
-                    Logs.Add(new LogMessage
+                    var log = new LogMessage
                     {
                         Timestamp = DateTime.Now,
                         Message = line
-                    });
+                    };
+
+                    Logs.Add(log);
+                    fileLines.Add(FormatLogFileLine(log));
                 }
             }
 
+            QueueLogLinesToFile(fileLines);
+
             TrimLogCollection();
+            OnPropertyChanged(nameof(LogSearchResultText));
         }
 
         /// <summary>
@@ -703,11 +739,131 @@ namespace DynaOrchestrator.Desktop.ViewModels
             }
         }
 
+        private static string CreateLogFilePath()
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string logDir = Path.Combine(baseDir, "logs");
+
+            try
+            {
+                Directory.CreateDirectory(logDir);
+            }
+            catch
+            {
+                logDir = Path.Combine(Path.GetTempPath(), "DynaOrchestrator", "logs");
+                Directory.CreateDirectory(logDir);
+            }
+
+            return Path.Combine(
+                logDir,
+                $"DynaOrchestrator_{DateTime.Now:yyyyMMdd_HHmmss}.log");
+        }
+
+        private static string FormatLogFileLine(LogMessage log)
+        {
+            return $"[{log.Timestamp:yyyy-MM-dd HH:mm:ss.fff}] {log.Message}";
+        }
+
+        private void QueueLogLinesToFile(IReadOnlyList<string> lines)
+        {
+            if (lines.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var line in lines)
+            {
+                _logFileChannel.Writer.TryWrite(line);
+            }
+        }
+
+        private async Task ProcessLogFileQueueAsync()
+        {
+            var buffer = new List<string>(LogFileBatchSize);
+
+            try
+            {
+                await using var stream = new FileStream(
+                    _logFilePath,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite,
+                    bufferSize: 64 * 1024,
+                    useAsync: true);
+
+                await using var writer = new StreamWriter(
+                    stream,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                    bufferSize: 64 * 1024);
+
+                while (await _logFileChannel.Reader.WaitToReadAsync(_logFileWriterCts.Token).ConfigureAwait(false))
+                {
+                    buffer.Clear();
+
+                    while (buffer.Count < LogFileBatchSize &&
+                           _logFileChannel.Reader.TryRead(out var line))
+                    {
+                        buffer.Add(line);
+                    }
+
+                    await WriteLogBufferAsync(writer, buffer).ConfigureAwait(false);
+                }
+
+                // Channel 完成后，保险起见再清空一次剩余内容。
+                buffer.Clear();
+
+                while (_logFileChannel.Reader.TryRead(out var line))
+                {
+                    buffer.Add(line);
+
+                    if (buffer.Count >= LogFileBatchSize)
+                    {
+                        await WriteLogBufferAsync(writer, buffer).ConfigureAwait(false);
+                        buffer.Clear();
+                    }
+                }
+
+                await WriteLogBufferAsync(writer, buffer).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // 程序关闭时可能触发，忽略。
+            }
+            catch (Exception ex)
+            {
+                // 不要在这里调用 AppendLog，否则文件写入失败会递归触发日志写入。
+                Debug.WriteLine($"日志文件写入失败: {ex}");
+            }
+        }
+
+        private static async Task WriteLogBufferAsync(StreamWriter writer, IReadOnlyList<string> buffer)
+        {
+            if (buffer.Count == 0)
+            {
+                return;
+            }
+
+            var builder = new StringBuilder();
+
+            foreach (var line in buffer)
+            {
+                builder.AppendLine(line);
+            }
+
+            await writer.WriteAsync(builder.ToString()).ConfigureAwait(false);
+            await writer.FlushAsync().ConfigureAwait(false);
+        }
+
         /// <summary>
         /// 控制日志最大保留行数，避免长时间批处理导致 UI 内存持续增长。
         /// </summary>
         private void TrimLogCollection()
         {
+            if (Logs.Count <= MaxLogLines + LogTrimBufferLines)
+            {
+                return;
+            }
+
             int removeCount = Logs.Count - MaxLogLines;
 
             for (int i = 0; i < removeCount; i++)
@@ -761,6 +917,27 @@ namespace DynaOrchestrator.Desktop.ViewModels
             foreach (var record in Cases)
             {
                 record.IsSelected = isSelected;
+            }
+        }
+
+        public void Dispose()
+        {
+            _logFileChannel.Writer.TryComplete();
+
+            try
+            {
+                if (!_logFileWriterTask.Wait(TimeSpan.FromSeconds(3)))
+                {
+                    _logFileWriterCts.Cancel();
+                }
+            }
+            catch
+            {
+                // 关闭阶段不再向 UI 写日志，避免递归或阻塞退出。
+            }
+            finally
+            {
+                _logFileWriterCts.Dispose();
             }
         }
     }

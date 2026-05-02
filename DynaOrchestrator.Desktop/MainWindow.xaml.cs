@@ -27,6 +27,8 @@ public partial class MainWindow : Window
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
         _viewModel.Logs.CollectionChanged -= Logs_CollectionChanged;
+        _viewModel.Dispose();
+
         Closed -= MainWindow_Closed;
     }
 
