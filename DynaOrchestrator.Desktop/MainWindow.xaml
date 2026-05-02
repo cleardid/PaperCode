@@ -161,6 +161,33 @@
             <DataGrid ItemsSource="{Binding Cases}" AutoGenerateColumns="False" 
                       CanUserAddRows="False" IsReadOnly="True" HeadersVisibility="Column" 
                       AlternatingRowBackground="#FAFAFA" BorderThickness="0">
+                <DataGrid.RowStyle>
+                    <Style TargetType="{x:Type DataGridRow}">
+                        <Setter Property="Background" Value="White"/>
+                        <Setter Property="BorderBrush" Value="Transparent"/>
+                        <Setter Property="BorderThickness" Value="0,0,0,1"/>
+                        <Setter Property="FontWeight" Value="Normal"/>
+
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#EFF6FF"/>
+                            </Trigger>
+
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#BFDBFE"/>
+                                <Setter Property="Foreground" Value="#111827"/>
+                            </Trigger>
+
+                            <DataTrigger Binding="{Binding Status}" Value="Running">
+                                <Setter Property="Background" Value="#DBEAFE"/>
+                                <Setter Property="BorderBrush" Value="#2563EB"/>
+                                <Setter Property="BorderThickness" Value="4,0,0,1"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.RowStyle>
+
                 <DataGrid.Columns>
                     <DataGridTemplateColumn Header="选择" Width="60">
                         <DataGridTemplateColumn.CellTemplate>
