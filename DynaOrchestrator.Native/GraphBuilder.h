@@ -24,4 +24,9 @@ void BuildGraphWithHashing(const std::vector<Point>& nodes,
 	std::vector<int>& out_cols,
 	std::vector<float>& out_weights);
 
+// 专门用于预计算边数的方法（零堆内存分配）
+size_t EstimateGraphEdges(const std::vector<Point>& nodes,
+	const std::vector<Triangle>& stl_mesh,
+	float Rc);
+
 #endif // PI_GNN_GRAPHENGINE_GRAPHBUILDER_H

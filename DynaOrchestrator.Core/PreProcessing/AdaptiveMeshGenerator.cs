@@ -1,4 +1,5 @@
 ﻿using DynaOrchestrator.Core.Models;
+using DynaOrchestrator.Core.PostProcessing;
 using System.Globalization;
 
 namespace DynaOrchestrator.Core.PreProcessing
@@ -216,7 +217,7 @@ namespace DynaOrchestrator.Core.PreProcessing
         /// <param name="opt">其他配置参数</param>
         /// <param name="exp">爆炸源信息</param>
         /// <returns></returns>
-        public static void ProcessAndGenerate(string inputKFile, string outputKFile, List<Triangle> stlMesh, OtherConfig opt, ExplosiveParams exp, Action<string>? logger)
+        public static void ProcessAndGenerate(string inputKFile, string outputKFile, string filePath, List<Triangle> stlMesh, OtherConfig opt, ExplosiveParams exp, Action<string>? logger)
         {
             // 1. 优先基于 STL 提取房间包围盒；若失败则回退到 K 文件 *NODE
             var box = BuildBoundingBox(inputKFile, stlMesh, logger);
@@ -224,10 +225,13 @@ namespace DynaOrchestrator.Core.PreProcessing
             logger?.Invoke($"[解析] 空间包围盒: X[{box.MinX}, {box.MaxX}], Y[{box.MinY}, {box.MaxY}], Z[{box.MinZ}, {box.MaxZ}]");
             logger?.Invoke($"[解析] 爆炸源中心: ({exp.Xc}, {exp.Yc}, {exp.Zc}), 半径: {exp.Radius} mm");
 
-            // 2. 在开始生成测点前，预先构建加速器（仅耗时数毫秒）
+            // 2. 在开始生成测点前，预先构建加速器
             var accelerator = new MeshAccelerator(stlMesh, box);
             // 然后生成自适应观测点
             var tracers = GenerateTracers(box, exp, stlMesh, accelerator, opt, logger);
+
+            // 图规模校验
+            PreProcessAndCheckGraphSize(filePath, tracers, (float)opt.Rc, logger);
 
             // 3. 流式重写 K 文件：边读边写，内存占用极低
             using (var reader = new StreamReader(inputKFile, System.Text.Encoding.ASCII))
@@ -433,6 +437,50 @@ namespace DynaOrchestrator.Core.PreProcessing
 
             logger?.Invoke($"[采样] 基于 STL 的自适应测点生成完毕，总计保留节点数: {tracers.Count}");
             return tracers;
+        }
+
+        public static void PreProcessAndCheckGraphSize(string stlPath, List<TracerPoint> tracers, float Rc, Action<string>? logger)
+        {
+            int maxEdgeLimit = 15000000; // 1500万条边阈值
+            int numNodes = tracers.Count;
+
+            logger?.Invoke($"[预检] 正在将 {numNodes} 个测点坐标拷贝至非托管内存，准备进行 C++ 物理连通性预估...");
+
+            // 1. 将 List<TracerPoint> 展平为一维数组 (C++ 很容易解析)
+            float[] flatCoords = new float[numNodes * 3];
+            for (int i = 0; i < numNodes; i++)
+            {
+                flatCoords[i * 3] = (float)tracers[i].X;
+                flatCoords[i * 3 + 1] = (float)tracers[i].Y;
+                flatCoords[i * 3 + 2] = (float)tracers[i].Z;
+            }
+
+            // 2. 调用 C++ 预估引擎
+            bool success = GraphEngineAPI.EstimateGraphSizeDirect(
+                flatCoords,
+                numNodes,
+                stlPath,
+                Rc,
+                out int estimatedEdges);
+
+            if (!success)
+            {
+                throw new Exception("图规模预估失败，请检查 STL 文件路径或底层 C++ 引擎。");
+            }
+
+            logger?.Invoke($"[预检结果] 节点数: {numNodes}, 预计生成双向边数: {estimatedEdges}");
+
+            // 3. 拦截判定
+            if (estimatedEdges > maxEdgeLimit)
+            {
+                logger?.Invoke($"[严重警告] 预估边数 ({estimatedEdges}) 超出 GNN 处理极限 ({maxEdgeLimit})！");
+                // 抛出特定的业务异常，让外层捕获并将工况标记为 Failed，避免白白浪费算力去跑物理仿真
+                throw new InvalidOperationException($"网格过于密集 (预估边数: {estimatedEdges})，触发内存保护屏障。请调大降采样系数或减小 Rc。");
+            }
+            else
+            {
+                logger?.Invoke("[预检通过] 满足 GNN 显存限制，可以安全启动 LS-DYNA 求解器。");
+            }
         }
 
         /// <summary>

@@ -274,3 +274,80 @@ void BuildGraphWithHashing(const std::vector<Point>& nodes,
 		<< ", cols=" << out_cols.size()
 		<< ", weights=" << out_weights.size() << std::endl;
 }
+
+// 专门用于预计算边数的方法（零堆内存分配）
+size_t EstimateGraphEdges(const std::vector<Point>& nodes,
+	const std::vector<Triangle>& stl_mesh,
+	float Rc)
+{
+	const int num_nodes = static_cast<int>(nodes.size());
+	if (num_nodes == 0 || !(Rc > 0.0f)) return 0;
+
+	// 1. 构建包围盒
+	float min_x = nodes[0].x, min_y = nodes[0].y, min_z = nodes[0].z;
+	float max_x = nodes[0].x, max_y = nodes[0].y, max_z = nodes[0].z;
+	for (const auto& p : nodes) {
+		if (p.x < min_x) min_x = p.x; if (p.x > max_x) max_x = p.x;
+		if (p.y < min_y) min_y = p.y; if (p.y > max_y) max_y = p.y;
+		if (p.z < min_z) min_z = p.z; if (p.z > max_z) max_z = p.z;
+	}
+
+	// 2. 构建空间哈希
+	const float cell_size = Rc;
+	const int nx = std::max(1, static_cast<int>(std::ceil((max_x - min_x) / cell_size)));
+	const int ny = std::max(1, static_cast<int>(std::ceil((max_y - min_y) / cell_size)));
+	const int nz = std::max(1, static_cast<int>(std::ceil((max_z - min_z) / cell_size)));
+
+	std::vector<std::vector<int>> grid(static_cast<size_t>(nx) * ny * nz);
+	for (int i = 0; i < num_nodes; ++i) {
+		int cx = std::min(nx - 1, std::max(0, static_cast<int>((nodes[i].x - min_x) / cell_size)));
+		int cy = std::min(ny - 1, std::max(0, static_cast<int>((nodes[i].y - min_y) / cell_size)));
+		int cz = std::min(nz - 1, std::max(0, static_cast<int>((nodes[i].z - min_z) / cell_size)));
+		grid[cx + cy * nx + cz * nx * ny].push_back(i);
+	}
+
+	const float Rc2 = Rc * Rc;
+	MeshUniformGrid mesh_accel = BuildMeshUniformGrid(stl_mesh, Rc);
+
+	std::atomic<size_t> total_edges(0);
+
+	// 3. 多线程并行计数（剔除所有的 std::vector push_back）
+#pragma omp parallel
+	{
+		size_t local_edge_count = 0;
+
+#pragma omp for schedule(dynamic, 64)
+		for (int i = 0; i < num_nodes; ++i)
+		{
+			const Point& p1 = nodes[i];
+			int cx = std::min(nx - 1, std::max(0, static_cast<int>((p1.x - min_x) / cell_size)));
+			int cy = std::min(ny - 1, std::max(0, static_cast<int>((p1.y - min_y) / cell_size)));
+			int cz = std::min(nz - 1, std::max(0, static_cast<int>((p1.z - min_z) / cell_size)));
+
+			for (int dx = -1; dx <= 1; ++dx) {
+				for (int dy = -1; dy <= 1; ++dy) {
+					for (int dz = -1; dz <= 1; ++dz) {
+						int nx_idx = cx + dx, ny_idx = cy + dy, nz_idx = cz + dz;
+						if (nx_idx < 0 || nx_idx >= nx || ny_idx < 0 || ny_idx >= ny || nz_idx < 0 || nz_idx >= nz)
+							continue;
+
+						for (int j : grid[nx_idx + ny_idx * nx + nz_idx * nx * ny]) {
+							if (j <= i) continue; // 无向边判定：只处理一次
+
+							const Point& p2 = nodes[j];
+							float dist2 = (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y) + (p1.z - p2.z) * (p1.z - p2.z);
+
+							if (dist2 > Rc2) continue;
+							if (!IsLineOfSightClear(p1, p2, stl_mesh, mesh_accel)) continue;
+
+							local_edge_count += 2; // 因为最终生成的是双向边COO，每次合格+2
+						}
+					}
+				}
+			}
+		}
+		total_edges += local_edge_count;
+	}
+
+	return total_edges;
+}

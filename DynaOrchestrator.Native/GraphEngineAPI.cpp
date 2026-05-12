@@ -185,4 +185,55 @@ extern "C"
 			PRINT_LOG << "[Info] GraphData memory freed." << std::endl;
 		}
 	}
+
+	EXPORT_API bool EstimateGraphSizeDirect(const float* node_coords, int num_nodes, const char* stlPath, float Rc, int* out_edges)
+	{
+		try
+		{
+			PRINT_LOG << "[Info] Estimating Graph Size from C# Array (Dry Run)..." << std::endl;
+
+			// 1. 解析 STL
+			const auto stl_mesh = ParseSTL(stlPath);
+			if (stl_mesh.empty())
+			{
+				PRINT_ERR << "[Error] EstimateGraphSizeDirect: STL mesh is empty." << std::endl;
+				return false;
+			}
+
+			// 2. 将 C# 传过来的扁平一维数组还原为 std::vector<Point>
+			// node_coords 的排布为 [x0, y0, z0, x1, y1, z1, ...]
+			std::vector<Point> nodes;
+			nodes.reserve(num_nodes);
+			for (int i = 0; i < num_nodes; ++i)
+			{
+				Point p;
+				p.id = i;
+				p.x = node_coords[i * 3];
+				p.y = node_coords[i * 3 + 1];
+				p.z = node_coords[i * 3 + 2];
+				nodes.push_back(p);
+			}
+
+			// 3. 调用底层无分配的干跑预估算法
+			size_t edge_count = EstimateGraphEdges(nodes, stl_mesh, Rc);
+
+			if (out_edges)
+			{
+				*out_edges = static_cast<int>(edge_count);
+			}
+
+			PRINT_LOG << "[Info] Direct Estimation Complete: Nodes=" << num_nodes << ", Edges=" << edge_count << std::endl;
+			return true;
+		}
+		catch (const std::exception& ex)
+		{
+			PRINT_ERR << "[Error] EstimateGraphSizeDirect exception: " << ex.what() << std::endl;
+			return false;
+		}
+		catch (...)
+		{
+			PRINT_ERR << "[Error] EstimateGraphSizeDirect unknown native exception." << std::endl;
+			return false;
+		}
+	}
 }

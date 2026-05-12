@@ -88,5 +88,22 @@ namespace DynaOrchestrator.Core.PostProcessing
         /// <param name="graphDataPtr">图数据指针</param>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void FreeGraphData(IntPtr graphDataPtr);
+
+        /// <summary>
+        /// 通过坐标数组预估图规模
+        /// </summary>
+        /// <param name="nodeCoords"></param>
+        /// <param name="numNodes"></param>
+        /// <param name="stlPath"></param>
+        /// <param name="Rc"></param>
+        /// <param name="outEdges"></param>
+        /// <returns></returns>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern bool EstimateGraphSizeDirect(
+            [In] float[] nodeCoords, // 一维展平的坐标数组 [x0,y0,z0,x1,y1,z1...]
+            int numNodes,
+            string stlPath,
+            float Rc,
+            out int outEdges);
     }
 }

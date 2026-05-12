@@ -162,7 +162,7 @@ namespace DynaOrchestrator.Core
             var stlMesh = STLParser.ParseBinarySTL(config.StlFile, logger);
 
             // 生成新测点并覆盖写入 model_out.k
-            AdaptiveMeshGenerator.ProcessAndGenerate(config.BaseKFile, config.OutputKFile, stlMesh, other, exp, logger);
+            AdaptiveMeshGenerator.ProcessAndGenerate(config.BaseKFile, config.OutputKFile, config.StlFile, stlMesh, other, exp, logger);
         }
 
         /// <summary>
